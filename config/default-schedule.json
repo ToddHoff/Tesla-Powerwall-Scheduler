@@ -1,0 +1,113 @@
+{
+  "timezone": "America/Los_Angeles",
+  "activeScheduleId": "summer",
+  "activeMonths": [6, 7, 8, 9],
+  "tesla": {
+    "region": "na",
+    "energySiteId": "",
+    "clientId": "",
+    "clientSecret": "",
+    "redirectUri": "http://localhost:8787/auth/callback"
+  },
+  "schedules": [
+    {
+      "id": "summer",
+      "name": "Summer",
+      "activeMonths": [6, 7, 8, 9],
+      "schedule": [
+        {
+          "id": "morning-off-peak",
+          "enabled": true,
+          "time": "07:00",
+          "backupReservePercent": 30,
+          "operationMode": "Self-Powered",
+          "operationModeApi": "self_consumption",
+          "energyExports": "Solar Only",
+          "energyExportsApi": "pv_only",
+          "gridCharging": false,
+          "purpose": "Off-Peak: lower backup to maximize solar absorption. Run hot tub primary heating/filtration cycle."
+        },
+        {
+          "id": "partial-peak-start",
+          "enabled": true,
+          "time": "15:00",
+          "backupReservePercent": 30,
+          "operationMode": "Time-Based Control",
+          "operationModeApi": "autonomous",
+          "energyExports": "Solar Only",
+          "energyExportsApi": "pv_only",
+          "gridCharging": false,
+          "purpose": "Partial-Peak begins: transition system behavior to prepare for peak-hour logic."
+        },
+        {
+          "id": "peak-start",
+          "enabled": true,
+          "time": "16:00",
+          "backupReservePercent": 30,
+          "operationMode": "Time-Based Control",
+          "operationModeApi": "autonomous",
+          "energyExports": "Solar Only",
+          "energyExportsApi": "pv_only",
+          "gridCharging": false,
+          "purpose": "Peak begins: home runs on battery. Hot tub heater should be locked out separately."
+        },
+        {
+          "id": "partial-peak-evening",
+          "enabled": true,
+          "time": "21:05",
+          "backupReservePercent": 30,
+          "operationMode": "Time-Based Control",
+          "operationModeApi": "autonomous",
+          "energyExports": "Solar Only",
+          "energyExportsApi": "pv_only",
+          "gridCharging": false,
+          "purpose": "Partial-Peak: keep grid charging disabled and reserve at 30% to ride out the evening on battery."
+        },
+        {
+          "id": "midnight-off-peak",
+          "enabled": true,
+          "time": "00:00",
+          "backupReservePercent": 50,
+          "operationMode": "Time-Based Control",
+          "operationModeApi": "autonomous",
+          "energyExports": "Solar Only",
+          "energyExportsApi": "pv_only",
+          "gridCharging": true,
+          "purpose": "Off-Peak begins: recharge battery to the 50% outage backup level. Hot tub maintenance cycles can run now."
+        }
+      ]
+    },
+    {
+      "id": "winter",
+      "name": "Winter",
+      "activeMonths": [1, 2, 3, 4, 5, 10, 11, 12],
+      "schedule": [
+        {
+          "id": "winter-morning",
+          "enabled": true,
+          "time": "07:00",
+          "backupReservePercent": 50,
+          "operationMode": "Self-Powered",
+          "operationModeApi": "self_consumption",
+          "energyExports": "Solar Only",
+          "energyExportsApi": "pv_only",
+          "gridCharging": false,
+          "purpose": "Winter morning: keep a higher outage reserve while using available solar."
+        },
+        {
+          "id": "winter-evening",
+          "enabled": true,
+          "time": "00:00",
+          "backupReservePercent": 50,
+          "operationMode": "Time-Based Control",
+          "operationModeApi": "autonomous",
+          "energyExports": "Solar Only",
+          "energyExportsApi": "pv_only",
+          "gridCharging": true,
+          "purpose": "Winter off-peak: allow low-cost grid charging back to the outage reserve level."
+        }
+      ]
+    }
+  ],
+  "schedule": []
+}

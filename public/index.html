@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tesla Powerwall Scheduler</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Local Agent</p>
+          <h1>Tesla Powerwall Scheduler</h1>
+        </div>
+        <div class="status-pill" id="connectionPill">Loading</div>
+      </header>
+
+      <section class="summary-grid">
+        <div class="metric">
+          <span>Active Schedule</span>
+          <strong id="seasonText">June-September</strong>
+        </div>
+        <div class="metric">
+          <span>Next Run</span>
+          <strong id="nextRunText">--</strong>
+        </div>
+        <div class="metric">
+          <span>Site</span>
+          <strong id="siteText">Not selected</strong>
+        </div>
+      </section>
+
+      <section class="layout">
+        <aside class="panel setup-panel">
+          <h2>Tesla Connection</h2>
+          <label>
+            Region
+            <select id="region">
+              <option value="na">North America</option>
+              <option value="eu">Europe</option>
+              <option value="cn">China</option>
+            </select>
+          </label>
+          <label>
+            Client ID
+            <input id="clientId" autocomplete="off" spellcheck="false" />
+          </label>
+          <label>
+            Client Secret
+            <input id="clientSecret" type="password" autocomplete="off" spellcheck="false" />
+          </label>
+          <label>
+            Redirect URI
+            <input id="redirectUri" spellcheck="false" />
+          </label>
+          <label>
+            Energy Site ID
+            <input id="energySiteId" spellcheck="false" />
+          </label>
+          <div class="button-row">
+            <button id="saveConfig" class="primary">Save</button>
+            <a class="button secondary" href="/auth/login">Connect Tesla</a>
+          </div>
+          <div class="button-row">
+            <button id="discoverSites">Discover Sites</button>
+            <button id="liveStatus">Live Status</button>
+          </div>
+          <div id="operationStatus" class="operation-status" aria-live="polite"></div>
+          <div id="siteResults" class="mini-output"></div>
+        </aside>
+
+        <section class="panel schedule-panel">
+          <div class="section-head">
+            <div>
+              <h2>Automation Schedules</h2>
+              <p>Only the active schedule is used by Lingon and the local runner.</p>
+            </div>
+            <button id="addRow">Add Row</button>
+          </div>
+
+          <div class="schedule-switcher" id="scheduleSwitcher"></div>
+          <div class="months" id="months"></div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>On</th>
+                  <th>Time</th>
+                  <th>Reserve</th>
+                  <th>Mode</th>
+                  <th>Exports</th>
+                  <th>Grid Charge</th>
+                  <th>Purpose</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="scheduleRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="section-head">
+          <div>
+            <h2>Activity</h2>
+            <p>Dry runs show the exact API payload before the agent sends it.</p>
+          </div>
+          <button id="refreshStatus">Refresh</button>
+        </div>
+        <pre id="logOutput"></pre>
+      </section>
+    </main>
+
+    <template id="rowTemplate">
+      <tr>
+        <td><input class="enabled" type="checkbox" /></td>
+        <td><input class="time" type="time" /></td>
+        <td><input class="reserve" type="number" min="0" max="100" /></td>
+        <td>
+          <select class="mode">
+            <option value="self_consumption">Self-Powered</option>
+            <option value="autonomous">Time-Based Control</option>
+          </select>
+        </td>
+        <td>
+          <select class="exports">
+            <option value="pv_only">Solar Only</option>
+            <option value="battery_ok">Everything</option>
+            <option value="never">None</option>
+          </select>
+        </td>
+        <td><input class="gridCharging" type="checkbox" /></td>
+        <td><textarea class="purpose" rows="3"></textarea></td>
+        <td class="actions">
+          <button class="dryRun">Dry Run</button>
+          <button class="runNow">Run Now</button>
+          <button class="remove danger">Remove</button>
+          <span class="row-status" aria-live="polite"></span>
+        </td>
+      </tr>
+    </template>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+.DS_Store
+.env
+node_modules/
+config/local-settings.json
+config/tokens.json
+config/oauth-state.json
+config/run-state.json
+config/schedule.json
+logs/
+*.log
+*.pem

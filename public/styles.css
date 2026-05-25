@@ -171,6 +171,31 @@ h2 {
   margin-bottom: 16px;
 }
 
+.app-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.app-tabs button {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.app-tabs button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.hidden {
+  display: none !important;
+}
+
 .metric,
 .panel {
   background: color-mix(in srgb, var(--panel) 94%, white);
@@ -224,6 +249,10 @@ h2 {
   margin-bottom: 14px;
 }
 
+.section-head.compact {
+  margin-bottom: 10px;
+}
+
 .section-head p {
   color: var(--muted);
   font-size: 13px;
@@ -234,13 +263,6 @@ h2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
-}
-
-.months {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin-bottom: 14px;
 }
 
 .schedule-switcher {
@@ -293,22 +315,6 @@ h2 {
   text-transform: uppercase;
 }
 
-.month-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: #11181d;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.month-chip input {
-  width: auto;
-}
-
 .table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -337,36 +343,44 @@ th {
   text-transform: uppercase;
 }
 
-td:first-child,
-th:first-child {
+.schedule-table td:first-child,
+.schedule-table th:first-child {
   width: 54px;
   text-align: center;
 }
 
-td:first-child input {
+.schedule-table td:first-child input {
   width: auto;
   margin-top: 10px;
 }
 
-td:nth-child(2) {
+.schedule-table td:nth-child(2) {
   width: 120px;
 }
 
-td:nth-child(3) {
+.schedule-table td:nth-child(3) {
   width: 100px;
 }
 
-td:nth-child(4),
-td:nth-child(5) {
-  width: 170px;
+.schedule-table td:nth-child(4) {
+  width: 230px;
 }
 
-td:nth-child(6) {
+.schedule-table td:nth-child(5) {
+  width: 190px;
+}
+
+.schedule-table td:nth-child(4) select,
+.schedule-table td:nth-child(5) select {
+  min-width: 100%;
+}
+
+.schedule-table td:nth-child(6) {
   width: 112px;
   text-align: center;
 }
 
-td:nth-child(6) input {
+.schedule-table td:nth-child(6) input {
   width: auto;
   margin-top: 10px;
 }
@@ -409,6 +423,72 @@ td:nth-child(6) input {
   color: var(--danger);
 }
 
+.share-view {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+#shareText,
+#reportText {
+  min-height: 260px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.report-card {
+  display: grid;
+  gap: 14px;
+}
+
+.report-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.report-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.report-metric {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #10161a;
+}
+
+.report-metric span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.report-metric strong {
+  font-size: 18px;
+}
+
+.report-table-wrap table {
+  min-width: 980px;
+}
+
+.hourly-table-wrap {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.report-subhead,
+.report-text-head {
+  margin-top: 4px;
+}
+
 .log-panel {
   margin-top: 16px;
 }
@@ -430,7 +510,9 @@ pre {
 @media (max-width: 960px) {
   .layout,
   .summary-grid,
-  .schedule-switcher {
+  .schedule-switcher,
+  .report-controls,
+  .report-summary {
     grid-template-columns: 1fr;
   }
 

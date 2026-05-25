@@ -1,6 +1,6 @@
 # Tesla Powerwall Scheduler
 
-A local web app and scheduler for applying a June-September Powerwall automation schedule through Tesla's Fleet API.
+A local web app and scheduler for applying an active Powerwall automation schedule through Tesla's Fleet API.
 
 ## What It Does
 
@@ -91,17 +91,15 @@ The default Summer schedule is already loaded:
 | 9:05 PM | 30% | Time-Based Control | Solar Only | Disabled |
 | 12:00 AM | 50% | Time-Based Control | Solar Only | Enabled |
 
-The schedule only runs in June, July, August, and September by default.
-
 ## Summer And Winter Schedules
 
 The UI stores multiple schedules in `config/schedule.json` under `schedules`, with one active schedule selected by `activeScheduleId`.
 
-- **Summer** is active by default and uses June-September.
-- **Winter** is included as a starter schedule for January-May and October-December.
+- **Summer** is active by default.
+- **Winter** is included as a starter schedule.
 - Press **Activate** on a schedule in the UI to make it the one used by Lingon, `npm run due`, and the local runner.
 
-Only the active schedule runs automatically. You can still view, edit, dry-run, and save either schedule from the local UI.
+Only the active schedule runs automatically. There is no month filtering; switch schedules when you want the seasonal behavior to change. You can still view, edit, dry-run, and save either schedule from the local UI.
 
 ## Run In The Background
 

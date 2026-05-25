@@ -47,6 +47,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/status' && req.method === 'GET') return sendJson(res, await getStatus());
     if (url.pathname === '/api/discover' && req.method === 'POST') return await discoverSites(res);
     if (url.pathname === '/api/live-status' && req.method === 'GET') return await liveStatus(res);
+    if (url.pathname === '/api/reports/net-billing' && req.method === 'GET') return await netBillingReport(url, res);
     if (url.pathname.startsWith('/api/run/') && req.method === 'POST') return await runManual(url, res);
     if (url.pathname === '/auth/login' && req.method === 'GET') return await startTeslaLogin(res);
     if (url.pathname === '/auth/callback' && req.method === 'GET') return await finishTeslaLogin(url, res);
@@ -118,8 +119,7 @@ async function readConfig() {
   return {
     ...normalized,
     tesla,
-    schedule: activeSchedule(normalized).schedule,
-    activeMonths: activeSchedule(normalized).activeMonths
+    schedule: activeSchedule(normalized).schedule
   };
 }
 
@@ -148,7 +148,6 @@ async function saveConfig(req, res) {
   const next = {
     timezone: incoming.timezone || current.timezone || 'America/Los_Angeles',
     activeScheduleId: normalizedIncoming.activeScheduleId,
-    activeMonths: active.activeMonths,
     tesla: {
       region: incoming.tesla?.region || current.tesla?.region || 'na',
       energySiteId: incoming.tesla?.energySiteId || current.tesla?.energySiteId || '',
@@ -195,12 +194,11 @@ function normalizeConfig(raw) {
   const legacyRows = normalizeSchedule(raw.schedule || []);
   let schedules = Array.isArray(raw.schedules) && raw.schedules.length
     ? raw.schedules
-    : defaultSchedules(legacyRows, raw.activeMonths);
+    : defaultSchedules(legacyRows);
 
   schedules = schedules.map((schedule, index) => ({
     id: schedule.id || (index === 0 ? 'summer' : `schedule-${index + 1}`),
     name: schedule.name || (index === 0 ? 'Summer' : `Schedule ${index + 1}`),
-    activeMonths: normalizeMonths(schedule.activeMonths || (index === 0 ? raw.activeMonths : undefined), index === 0 ? [6, 7, 8, 9] : [1, 2, 3, 4, 5, 10, 11, 12]),
     schedule: normalizeSchedule(schedule.schedule || [])
   }));
 
@@ -219,12 +217,11 @@ function normalizeConfig(raw) {
   };
 }
 
-function defaultSchedules(legacyRows, legacyMonths) {
+function defaultSchedules(legacyRows) {
   return [
     {
       id: 'summer',
       name: 'Summer',
-      activeMonths: normalizeMonths(legacyMonths, [6, 7, 8, 9]),
       schedule: legacyRows
     },
     defaultWinterSchedule()
@@ -235,7 +232,6 @@ function defaultWinterSchedule() {
   return {
     id: 'winter',
     name: 'Winter',
-    activeMonths: [1, 2, 3, 4, 5, 10, 11, 12],
     schedule: normalizeSchedule([
       {
         id: 'winter-morning',
@@ -263,11 +259,6 @@ function defaultWinterSchedule() {
       }
     ])
   };
-}
-
-function normalizeMonths(months, fallback) {
-  const values = Array.isArray(months) ? months : fallback;
-  return [...new Set(values.map(Number).filter(month => month >= 1 && month <= 12))].sort((a, b) => a - b);
 }
 
 function activeSchedule(config) {
@@ -464,6 +455,284 @@ async function liveStatus(res) {
   return sendJson(res, { siteInfo, live });
 }
 
+async function netBillingReport(url, res) {
+  const config = await readConfig();
+  requireTeslaSetting(config.tesla.energySiteId, 'Energy site ID');
+  const timeZone = url.searchParams.get('timeZone') || config.timezone || 'America/Los_Angeles';
+  const startDate = url.searchParams.get('startDate');
+  const endDate = url.searchParams.get('endDate');
+  if (!isDateOnly(startDate) || !isDateOnly(endDate)) {
+    return sendJson(res, { error: 'startDate and endDate must be YYYY-MM-DD.' }, 400);
+  }
+  if (startDate > endDate) {
+    return sendJson(res, { error: 'startDate must be on or before endDate.' }, 400);
+  }
+
+  const dates = dateRange(startDate, endDate);
+  if (dates.length > 31) {
+    return sendJson(res, { error: 'Report range is limited to 31 days to control Tesla API usage.' }, 400);
+  }
+
+  const responses = [];
+  const days = [];
+  const hourlyMap = new Map();
+  for (const date of dates) {
+    const params = new URLSearchParams({
+      kind: 'energy',
+      period: 'day',
+      start_date: zonedDateTimeParam(date, '00:00:00', timeZone),
+      end_date: zonedDateTimeParam(date, '23:59:59', timeZone),
+      time_zone: timeZone
+    });
+    const raw = await teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/calendar_history?${params}`);
+    const timeSeries = Array.isArray(raw.response?.time_series) ? raw.response.time_series : [];
+    days.push(aggregateEnergyIntervals(date, timeSeries));
+    addHourlyIntervals(hourlyMap, timeSeries);
+    responses.push({
+      date,
+      intervalCount: timeSeries.length,
+      period: raw.response?.period,
+      firstTimestamp: timeSeries[0]?.timestamp || null,
+      lastTimestamp: timeSeries.at(-1)?.timestamp || null
+    });
+  }
+  const totals = days.reduce((acc, day) => ({
+    importedKwh: acc.importedKwh + day.importedKwh,
+    exportedKwh: acc.exportedKwh + day.exportedKwh,
+    netKwh: acc.netKwh + day.netKwh,
+    batteryExportedKwh: acc.batteryExportedKwh + day.batteryExportedKwh,
+    solarExportedKwh: acc.solarExportedKwh + day.solarExportedKwh,
+    batteryImportedFromGridKwh: acc.batteryImportedFromGridKwh + day.batteryImportedFromGridKwh,
+    consumerImportedFromGridKwh: acc.consumerImportedFromGridKwh + day.consumerImportedFromGridKwh
+  }), {
+    importedKwh: 0,
+    exportedKwh: 0,
+    netKwh: 0,
+    batteryExportedKwh: 0,
+    solarExportedKwh: 0,
+    batteryImportedFromGridKwh: 0,
+    consumerImportedFromGridKwh: 0
+  });
+  const hourly = [...hourlyMap.values()].sort((a, b) => a.hour.localeCompare(b.hour)).map(roundEnergyRow);
+  const buckets = summarizeBuckets(hourly);
+
+  await logEvent('info', 'net_billing_report', {
+    startDate,
+    endDate,
+    timeZone,
+    days: days.length,
+    totals: roundReport(totals)
+  });
+
+  return sendJson(res, {
+    startDate,
+    endDate,
+    timeZone,
+    siteId: config.tesla.energySiteId,
+    days,
+    buckets,
+    hourly,
+    totals: roundReport(totals),
+    responses
+  });
+}
+
+function aggregateEnergyIntervals(date, intervals) {
+  const sum = intervals.reduce((acc, interval) => ({
+    batteryImportedFromGridWh: acc.batteryImportedFromGridWh + Number(interval.battery_energy_imported_from_grid || 0),
+    consumerImportedFromGridWh: acc.consumerImportedFromGridWh + Number(interval.consumer_energy_imported_from_grid || 0),
+    batteryExportedWh: acc.batteryExportedWh + Number(interval.grid_energy_exported_from_battery || 0),
+    solarExportedWh: acc.solarExportedWh + Number(interval.grid_energy_exported_from_solar || 0)
+  }), {
+    batteryImportedFromGridWh: 0,
+    consumerImportedFromGridWh: 0,
+    batteryExportedWh: 0,
+    solarExportedWh: 0
+  });
+
+  const batteryImportedFromGridKwh = whToKwh(sum.batteryImportedFromGridWh);
+  const consumerImportedFromGridKwh = whToKwh(sum.consumerImportedFromGridWh);
+  const batteryExportedKwh = whToKwh(sum.batteryExportedWh);
+  const solarExportedKwh = whToKwh(sum.solarExportedWh);
+  const importedKwh = batteryImportedFromGridKwh + consumerImportedFromGridKwh;
+  const exportedKwh = batteryExportedKwh + solarExportedKwh;
+  const netKwh = importedKwh - exportedKwh;
+  return {
+    date,
+    importedKwh: round(importedKwh),
+    exportedKwh: round(exportedKwh),
+    netKwh: round(netKwh),
+    batteryExportedKwh: round(batteryExportedKwh),
+    solarExportedKwh: round(solarExportedKwh),
+    batteryImportedFromGridKwh: round(batteryImportedFromGridKwh),
+    consumerImportedFromGridKwh: round(consumerImportedFromGridKwh),
+    intervalCount: intervals.length
+  };
+}
+
+function addHourlyIntervals(hourlyMap, intervals) {
+  for (const interval of intervals) {
+    const hour = String(interval.timestamp || '').slice(0, 13);
+    if (!hour) continue;
+    const existing = hourlyMap.get(hour) || blankEnergyRow({ hour });
+    addIntervalToRow(existing, interval);
+    hourlyMap.set(hour, existing);
+  }
+}
+
+function summarizeBuckets(hourly) {
+  const buckets = [
+    { id: 'offPeakMidnight', label: 'Midnight Off-Peak', startHour: 0, endHour: 6 },
+    { id: 'morningSolarRamp', label: 'Morning Solar Ramp', startHour: 7, endHour: 14 },
+    { id: 'partialPeakPrep', label: 'Partial-Peak Prep', startHour: 15, endHour: 15 },
+    { id: 'peak', label: 'Peak', startHour: 16, endHour: 20 },
+    { id: 'lateEvening', label: 'Late Evening', startHour: 21, endHour: 23 }
+  ].map(bucket => ({ ...bucket, ...blankEnergyTotals() }));
+
+  for (const hour of hourly) {
+    const localHour = Number(hour.hour.slice(11, 13));
+    const bucket = buckets.find(item => localHour >= item.startHour && localHour <= item.endHour);
+    if (!bucket) continue;
+    addEnergyTotals(bucket, hour);
+  }
+
+  return buckets.map(bucket => ({
+    id: bucket.id,
+    label: bucket.label,
+    window: `${String(bucket.startHour).padStart(2, '0')}:00-${String(bucket.endHour).padStart(2, '0')}:59`,
+    ...roundReport(pickEnergyTotals(bucket))
+  }));
+}
+
+function blankEnergyRow(extra = {}) {
+  return {
+    ...extra,
+    ...blankEnergyTotals()
+  };
+}
+
+function blankEnergyTotals() {
+  return {
+    importedKwh: 0,
+    exportedKwh: 0,
+    netKwh: 0,
+    batteryExportedKwh: 0,
+    solarExportedKwh: 0,
+    batteryImportedFromGridKwh: 0,
+    consumerImportedFromGridKwh: 0,
+    intervalCount: 0
+  };
+}
+
+function addIntervalToRow(row, interval) {
+  const batteryImportedFromGridKwh = whToKwh(interval.battery_energy_imported_from_grid);
+  const consumerImportedFromGridKwh = whToKwh(interval.consumer_energy_imported_from_grid);
+  const batteryExportedKwh = whToKwh(interval.grid_energy_exported_from_battery);
+  const solarExportedKwh = whToKwh(interval.grid_energy_exported_from_solar);
+  row.batteryImportedFromGridKwh += batteryImportedFromGridKwh;
+  row.consumerImportedFromGridKwh += consumerImportedFromGridKwh;
+  row.batteryExportedKwh += batteryExportedKwh;
+  row.solarExportedKwh += solarExportedKwh;
+  row.importedKwh += batteryImportedFromGridKwh + consumerImportedFromGridKwh;
+  row.exportedKwh += batteryExportedKwh + solarExportedKwh;
+  row.netKwh = row.importedKwh - row.exportedKwh;
+  row.intervalCount += 1;
+}
+
+function addEnergyTotals(target, source) {
+  const totals = pickEnergyTotals(source);
+  for (const [key, value] of Object.entries(totals)) {
+    target[key] += value;
+  }
+}
+
+function pickEnergyTotals(source) {
+  return {
+    importedKwh: source.importedKwh,
+    exportedKwh: source.exportedKwh,
+    netKwh: source.netKwh,
+    batteryExportedKwh: source.batteryExportedKwh,
+    solarExportedKwh: source.solarExportedKwh,
+    batteryImportedFromGridKwh: source.batteryImportedFromGridKwh,
+    consumerImportedFromGridKwh: source.consumerImportedFromGridKwh,
+    intervalCount: source.intervalCount
+  };
+}
+
+function roundEnergyRow(row) {
+  return {
+    ...row,
+    ...roundReport(pickEnergyTotals(row))
+  };
+}
+
+function whToKwh(value) {
+  return Number(value || 0) / 1000;
+}
+
+function round(value) {
+  return Math.round(value * 1000) / 1000;
+}
+
+function roundReport(report) {
+  return Object.fromEntries(Object.entries(report).map(([key, value]) => [key, round(value)]));
+}
+
+function isDateOnly(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value || '');
+}
+
+function dateRange(startDate, endDate) {
+  const dates = [];
+  const current = dateOnlyToUtc(startDate);
+  const end = dateOnlyToUtc(endDate);
+  while (current <= end) {
+    dates.push(current.toISOString().slice(0, 10));
+    current.setUTCDate(current.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+function dateOnlyToUtc(dateText) {
+  const [year, month, day] = dateText.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function zonedDateTimeParam(dateText, timeText, timeZone) {
+  return `${dateText}T${timeText}${timeZoneOffset(dateText, timeText, timeZone)}`;
+}
+
+function timeZoneOffset(dateText, timeText, timeZone) {
+  const [year, month, day] = dateText.split('-').map(Number);
+  const [hour, minute, second] = timeText.split(':').map(Number);
+  const utcGuess = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(utcGuess).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  const asUtc = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour === '24' ? '00' : parts.hour),
+    Number(parts.minute),
+    Number(parts.second)
+  );
+  const offsetMinutes = Math.round((asUtc - utcGuess.getTime()) / 60000);
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const abs = Math.abs(offsetMinutes);
+  return `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+}
+
 async function runManual(url, res) {
   const id = decodeURIComponent(url.pathname.replace('/api/run/', ''));
   const dryRun = url.searchParams.get('dryRun') === '1';
@@ -490,7 +759,6 @@ async function runDueSteps() {
   const config = await readConfig();
   const now = zonedParts(new Date(), config.timezone || 'America/Los_Angeles');
   const currentSchedule = activeSchedule(config);
-  if (!currentSchedule.activeMonths?.includes(now.month)) return;
 
   const runState = await readJson(RUN_STATE_PATH, {});
   for (const step of currentSchedule.schedule || []) {
@@ -524,7 +792,6 @@ function zonedParts(date, timezone) {
 
   const hour = parts.hour === '24' ? '00' : parts.hour;
   return {
-    month: Number(parts.month),
     date: `${parts.year}-${parts.month}-${parts.day}`,
     hhmm: `${hour}:${parts.minute}`
   };

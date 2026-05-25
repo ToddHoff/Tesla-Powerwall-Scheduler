@@ -89,12 +89,6 @@ async function runDueSteps({ dryRun, force, at, date, windowMinutes }) {
     errors: []
   };
 
-  if (!currentSchedule.activeMonths?.includes(now.month) && !force) {
-    summary.skipped.push({ reason: 'inactive_month', scheduleId: currentSchedule.id, month: now.month });
-    await logEvent('info', 'one_shot_noop', summary);
-    return summary;
-  }
-
   const runState = await readJson(RUN_STATE_PATH, {});
   const dueSteps = (currentSchedule.schedule || []).filter(step => isDue(step, current.minutes, windowMinutes, force));
 
@@ -158,7 +152,6 @@ function zonedParts(date, timezone) {
 
   const hour = parts.hour === '24' ? '00' : parts.hour;
   return {
-    month: Number(parts.month),
     date: `${parts.year}-${parts.month}-${parts.day}`,
     hhmm: `${hour}:${parts.minute}`
   };
@@ -288,8 +281,7 @@ async function readConfig() {
   return {
     ...normalized,
     tesla,
-    schedule: activeSchedule(normalized).schedule,
-    activeMonths: activeSchedule(normalized).activeMonths
+    schedule: activeSchedule(normalized).schedule
   };
 }
 
@@ -297,12 +289,11 @@ function normalizeConfig(raw) {
   const legacyRows = normalizeSchedule(raw.schedule || []);
   let schedules = Array.isArray(raw.schedules) && raw.schedules.length
     ? raw.schedules
-    : defaultSchedules(legacyRows, raw.activeMonths);
+    : defaultSchedules(legacyRows);
 
   schedules = schedules.map((schedule, index) => ({
     id: schedule.id || (index === 0 ? 'summer' : `schedule-${index + 1}`),
     name: schedule.name || (index === 0 ? 'Summer' : `Schedule ${index + 1}`),
-    activeMonths: normalizeMonths(schedule.activeMonths || (index === 0 ? raw.activeMonths : undefined), index === 0 ? [6, 7, 8, 9] : [1, 2, 3, 4, 5, 10, 11, 12]),
     schedule: normalizeSchedule(schedule.schedule || [])
   }));
 
@@ -321,12 +312,11 @@ function normalizeConfig(raw) {
   };
 }
 
-function defaultSchedules(legacyRows, legacyMonths) {
+function defaultSchedules(legacyRows) {
   return [
     {
       id: 'summer',
       name: 'Summer',
-      activeMonths: normalizeMonths(legacyMonths, [6, 7, 8, 9]),
       schedule: legacyRows
     },
     defaultWinterSchedule()
@@ -337,7 +327,6 @@ function defaultWinterSchedule() {
   return {
     id: 'winter',
     name: 'Winter',
-    activeMonths: [1, 2, 3, 4, 5, 10, 11, 12],
     schedule: normalizeSchedule([
       {
         id: 'winter-morning',
@@ -384,11 +373,6 @@ function normalizeSchedule(rows) {
 
 function activeSchedule(config) {
   return config.schedules.find(schedule => schedule.id === config.activeScheduleId) || config.schedules[0];
-}
-
-function normalizeMonths(months, fallback) {
-  const values = Array.isArray(months) ? months : fallback;
-  return [...new Set(values.map(Number).filter(month => month >= 1 && month <= 12))].sort((a, b) => a - b);
 }
 
 function clamp(value, min, max) {

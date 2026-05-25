@@ -19,7 +19,7 @@
       <section class="summary-grid">
         <div class="metric">
           <span>Active Schedule</span>
-          <strong id="seasonText">June-September</strong>
+          <strong id="seasonText">Loading</strong>
         </div>
         <div class="metric">
           <span>Next Run</span>
@@ -31,7 +31,13 @@
         </div>
       </section>
 
-      <section class="layout">
+      <nav class="app-tabs" aria-label="Views">
+        <button class="active" data-view="schedules">Schedules</button>
+        <button data-view="reports">Reports</button>
+        <button data-view="activity">Activity</button>
+      </nav>
+
+      <section id="schedulesView" class="view-panel layout">
         <aside class="panel setup-panel">
           <h2>Tesla Connection</h2>
           <label>
@@ -80,10 +86,9 @@
           </div>
 
           <div class="schedule-switcher" id="scheduleSwitcher"></div>
-          <div class="months" id="months"></div>
 
           <div class="table-wrap">
-            <table>
+            <table class="schedule-table">
               <thead>
                 <tr>
                   <th>On</th>
@@ -99,10 +104,143 @@
               <tbody id="scheduleRows"></tbody>
             </table>
           </div>
+
+          <div class="share-view">
+            <div class="section-head compact">
+              <div>
+                <h2>Share View</h2>
+                <p>Formatted summary for the selected schedule.</p>
+              </div>
+              <button id="copyShareText">Copy</button>
+            </div>
+            <textarea id="shareText" readonly rows="12" spellcheck="false"></textarea>
+            <div id="shareStatus" class="operation-status" aria-live="polite"></div>
+          </div>
         </section>
       </section>
 
-      <section class="panel log-panel">
+      <section id="reportsView" class="view-panel panel report-panel hidden">
+        <div class="section-head">
+          <div>
+            <h2>Reports</h2>
+            <p>Audit schedule performance using Tesla energy history.</p>
+          </div>
+        </div>
+
+        <div class="report-card">
+          <div class="section-head compact">
+            <div>
+              <h2>Net Billing Audit</h2>
+              <p>Daily grid import, export, and net balance from calendar history.</p>
+            </div>
+            <button id="runNetBillingReport" class="primary">Run Report</button>
+          </div>
+
+          <div class="report-controls">
+            <label>
+              Start Date
+              <input id="reportStartDate" type="date" />
+            </label>
+            <label>
+              End Date
+              <input id="reportEndDate" type="date" />
+            </label>
+            <label>
+              Timezone
+              <input id="reportTimeZone" value="America/Los_Angeles" spellcheck="false" />
+            </label>
+          </div>
+
+          <div id="reportStatus" class="operation-status" aria-live="polite"></div>
+          <div id="reportSummary" class="report-summary"></div>
+
+          <div class="section-head compact report-subhead">
+            <div>
+              <h2>Time Windows</h2>
+              <p>Shows whether imports and exports are landing in the intended parts of the day.</p>
+            </div>
+          </div>
+          <div class="table-wrap report-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Window</th>
+                  <th>Time</th>
+                  <th>Imported</th>
+                  <th>Exported</th>
+                  <th>Net</th>
+                  <th>Battery Export</th>
+                  <th>Solar Export</th>
+                  <th>Grid to Battery</th>
+                  <th>Grid to Home</th>
+                </tr>
+              </thead>
+              <tbody id="bucketRows"></tbody>
+            </table>
+          </div>
+
+          <div class="section-head compact report-subhead">
+            <div>
+              <h2>Hourly Detail</h2>
+              <p>Aggregated from Tesla's interval data.</p>
+            </div>
+          </div>
+          <div class="table-wrap report-table-wrap hourly-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Hour</th>
+                  <th>Intervals</th>
+                  <th>Imported</th>
+                  <th>Exported</th>
+                  <th>Net</th>
+                  <th>Battery Export</th>
+                  <th>Solar Export</th>
+                  <th>Grid to Battery</th>
+                  <th>Grid to Home</th>
+                </tr>
+              </thead>
+              <tbody id="hourlyRows"></tbody>
+            </table>
+          </div>
+
+          <div class="section-head compact report-subhead">
+            <div>
+              <h2>Daily Totals</h2>
+              <p>One row per day.</p>
+            </div>
+          </div>
+          <div class="table-wrap report-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Intervals</th>
+                  <th>Imported</th>
+                  <th>Exported</th>
+                  <th>Net</th>
+                  <th>Battery Export</th>
+                  <th>Solar Export</th>
+                  <th>Grid to Battery</th>
+                  <th>Grid to Home</th>
+                </tr>
+              </thead>
+              <tbody id="reportRows"></tbody>
+            </table>
+          </div>
+
+          <div class="section-head compact report-text-head">
+            <div>
+              <h2>Report Text</h2>
+              <p>Formatted report for notes or sharing.</p>
+            </div>
+            <button id="copyReportText">Copy</button>
+          </div>
+          <textarea id="reportText" readonly rows="12" spellcheck="false"></textarea>
+        </div>
+      </section>
+
+      <section id="activityView" class="view-panel panel log-panel hidden">
         <div class="section-head">
           <div>
             <h2>Activity</h2>

@@ -1,7 +1,6 @@
 {
   "timezone": "America/Los_Angeles",
   "activeScheduleId": "summer",
-  "activeMonths": [6, 7, 8, 9],
   "tesla": {
     "region": "na",
     "energySiteId": "",
@@ -13,7 +12,6 @@
     {
       "id": "summer",
       "name": "Summer",
-      "activeMonths": [6, 7, 8, 9],
       "schedule": [
         {
           "id": "morning-off-peak",
@@ -80,7 +78,6 @@
     {
       "id": "winter",
       "name": "Winter",
-      "activeMonths": [1, 2, 3, 4, 5, 10, 11, 12],
       "schedule": [
         {
           "id": "winter-morning",

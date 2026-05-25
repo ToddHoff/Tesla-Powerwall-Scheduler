@@ -1,8 +1,12 @@
-const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 let config;
 let selectedScheduleId;
+let latestReport;
 
 const els = {
+  viewButtons: [...document.querySelectorAll('.app-tabs button')],
+  schedulesView: document.querySelector('#schedulesView'),
+  reportsView: document.querySelector('#reportsView'),
+  activityView: document.querySelector('#activityView'),
   connectionPill: document.querySelector('#connectionPill'),
   seasonText: document.querySelector('#seasonText'),
   nextRunText: document.querySelector('#nextRunText'),
@@ -18,15 +22,33 @@ const els = {
   operationStatus: document.querySelector('#operationStatus'),
   siteResults: document.querySelector('#siteResults'),
   scheduleSwitcher: document.querySelector('#scheduleSwitcher'),
-  months: document.querySelector('#months'),
   scheduleRows: document.querySelector('#scheduleRows'),
   rowTemplate: document.querySelector('#rowTemplate'),
   addRow: document.querySelector('#addRow'),
+  copyShareText: document.querySelector('#copyShareText'),
+  shareText: document.querySelector('#shareText'),
+  shareStatus: document.querySelector('#shareStatus'),
+  runNetBillingReport: document.querySelector('#runNetBillingReport'),
+  reportStartDate: document.querySelector('#reportStartDate'),
+  reportEndDate: document.querySelector('#reportEndDate'),
+  reportTimeZone: document.querySelector('#reportTimeZone'),
+  reportStatus: document.querySelector('#reportStatus'),
+  reportSummary: document.querySelector('#reportSummary'),
+  bucketRows: document.querySelector('#bucketRows'),
+  hourlyRows: document.querySelector('#hourlyRows'),
+  reportRows: document.querySelector('#reportRows'),
+  reportText: document.querySelector('#reportText'),
+  copyReportText: document.querySelector('#copyReportText'),
   refreshStatus: document.querySelector('#refreshStatus'),
   logOutput: document.querySelector('#logOutput')
 };
 
+initReportDates();
 await load();
+
+els.viewButtons.forEach(button => {
+  button.addEventListener('click', () => setView(button.dataset.view));
+});
 
 els.saveConfig.addEventListener('click', async () => {
   await runWithFeedback({
@@ -62,6 +84,34 @@ els.addRow.addEventListener('click', () => {
     purpose: ''
   });
   renderSchedule();
+});
+
+els.runNetBillingReport.addEventListener('click', runNetBillingReport);
+
+els.copyReportText.addEventListener('click', async () => {
+  await runWithFeedback({
+    buttons: [els.copyReportText],
+    pendingText: 'Copying...',
+    successText: 'Copy',
+    statusEl: els.reportStatus,
+    pendingMessage: 'Copying report...',
+    successMessage: 'Copied report.',
+    task: async () => copyText(els.reportText.value)
+  });
+});
+
+els.copyShareText.addEventListener('click', async () => {
+  await runWithFeedback({
+    buttons: [els.copyShareText],
+    pendingText: 'Copying...',
+    successText: 'Copy',
+    statusEl: els.shareStatus,
+    pendingMessage: 'Copying summary...',
+    successMessage: 'Copied summary.',
+    task: async () => {
+      await copyText(els.shareText.value);
+    }
+  });
 });
 
 els.refreshStatus.addEventListener('click', refreshStatus);
@@ -104,8 +154,17 @@ els.liveStatus.addEventListener('click', async () => {
 async function load() {
   config = await api('/api/config');
   selectedScheduleId = selectedScheduleId || config.activeScheduleId;
+  els.reportTimeZone.value = config.timezone || 'America/Los_Angeles';
   render();
   await refreshStatus();
+}
+
+function setView(view) {
+  const selected = view || 'schedules';
+  els.viewButtons.forEach(button => button.classList.toggle('active', button.dataset.view === selected));
+  els.schedulesView.classList.toggle('hidden', selected !== 'schedules');
+  els.reportsView.classList.toggle('hidden', selected !== 'reports');
+  els.activityView.classList.toggle('hidden', selected !== 'activity');
 }
 
 function render() {
@@ -119,8 +178,8 @@ function render() {
   els.connectionPill.classList.toggle('connected', config.auth.connected);
   els.siteText.textContent = config.tesla.energySiteId || 'Not selected';
   renderScheduleSwitcher();
-  renderMonths();
   renderSchedule();
+  renderShareText();
 }
 
 function ensureSchedules() {
@@ -129,13 +188,11 @@ function ensureSchedules() {
       {
         id: 'summer',
         name: 'Summer',
-        activeMonths: config.activeMonths || [6, 7, 8, 9],
         schedule: config.schedule || []
       },
       {
         id: 'winter',
         name: 'Winter',
-        activeMonths: [1, 2, 3, 4, 5, 10, 11, 12],
         schedule: []
       }
     ];
@@ -164,6 +221,7 @@ function renderScheduleSwitcher() {
     title.addEventListener('input', () => {
       schedule.name = title.value || schedule.id;
       updateSeasonText();
+      renderShareText();
     });
     title.addEventListener('click', event => event.stopPropagation());
 
@@ -200,37 +258,9 @@ function renderScheduleSwitcher() {
   updateSeasonText();
 }
 
-function renderMonths() {
-  const schedule = selectedSchedule();
-  els.months.replaceChildren();
-  monthNames.forEach((name, index) => {
-    const month = index + 1;
-    const label = document.createElement('label');
-    label.className = 'month-chip';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = schedule.activeMonths.includes(month);
-    checkbox.addEventListener('change', () => {
-      if (checkbox.checked) {
-        schedule.activeMonths = [...new Set([...schedule.activeMonths, month])].sort((a, b) => a - b);
-      } else {
-        schedule.activeMonths = schedule.activeMonths.filter(item => item !== month);
-      }
-      updateSeasonText();
-    });
-    label.append(checkbox, name);
-    els.months.append(label);
-  });
-  updateSeasonText();
-}
-
 function updateSeasonText() {
   const active = activeSchedule();
-  els.seasonText.textContent = `${active.name}: ${formatMonths(active.activeMonths)}`;
-}
-
-function formatMonths(months) {
-  return months.map(month => monthNames[month - 1]).join(', ') || 'No months enabled';
+  els.seasonText.textContent = active.name;
 }
 
 function renderSchedule() {
@@ -260,10 +290,12 @@ function renderSchedule() {
       tr.querySelector('.remove').addEventListener('click', () => {
         schedule.schedule = schedule.schedule.filter(item => item.id !== row.id);
         renderSchedule();
+        renderShareText();
       });
 
       els.scheduleRows.append(fragment);
     });
+  renderShareText();
 }
 
 function bindInput(root, selector, row, key, mode, afterChange) {
@@ -275,6 +307,7 @@ function bindInput(root, selector, row, key, mode, afterChange) {
     else if (mode === 'number') row[key] = Number(input.value);
     else row[key] = input.value;
     afterChange?.(row[key]);
+    renderShareText();
   });
 }
 
@@ -283,7 +316,6 @@ function collectConfig() {
   return {
     timezone: config.timezone || 'America/Los_Angeles',
     activeScheduleId: config.activeScheduleId,
-    activeMonths: active.activeMonths,
     schedules: config.schedules,
     tesla: {
       region: els.region.value,
@@ -342,6 +374,246 @@ function selectedSchedule() {
 
 function activeSchedule() {
   return config.schedules.find(schedule => schedule.id === config.activeScheduleId) || config.schedules[0];
+}
+
+function renderShareText() {
+  const schedule = selectedSchedule();
+  const activeText = schedule.id === config.activeScheduleId ? 'Yes' : 'No';
+  const lines = [
+    `${schedule.name} Tesla Powerwall Schedule`,
+    `Active: ${activeText}`,
+    `Timezone: ${config.timezone || 'America/Los_Angeles'}`,
+    ''
+  ];
+
+  const rows = [...schedule.schedule].sort((a, b) => a.time.localeCompare(b.time));
+  rows.forEach(row => {
+    lines.push(formatTime(row.time));
+    lines.push(`  Enabled: ${row.enabled ? 'Yes' : 'No'}`);
+    lines.push(`  Backup Reserve: ${row.backupReservePercent}%`);
+    lines.push(`  Operational Mode: ${row.operationMode || modeLabel(row.operationModeApi)}`);
+    lines.push(`  Energy Exports: ${row.energyExports || exportLabel(row.energyExportsApi)}`);
+    lines.push(`  Grid Charging: ${row.gridCharging ? 'Enabled' : 'Disabled'}`);
+    if (row.purpose?.trim()) lines.push(`  Purpose: ${row.purpose.trim()}`);
+    lines.push('');
+  });
+
+  els.shareText.value = lines.join('\n').trimEnd();
+}
+
+async function runNetBillingReport() {
+  await runWithFeedback({
+    buttons: [els.runNetBillingReport],
+    pendingText: 'Running...',
+    successText: 'Run Report',
+    statusEl: els.reportStatus,
+    pendingMessage: 'Fetching Tesla energy history...',
+    successMessage: 'Report complete.',
+    task: async () => {
+      const params = new URLSearchParams({
+        startDate: els.reportStartDate.value,
+        endDate: els.reportEndDate.value,
+        timeZone: els.reportTimeZone.value.trim() || 'America/Los_Angeles'
+      });
+      latestReport = await api(`/api/reports/net-billing?${params}`);
+      renderReport(latestReport);
+    }
+  });
+}
+
+function renderReport(report) {
+  els.reportSummary.replaceChildren();
+  const summaryItems = [
+    ['Imported', `${formatKwh(report.totals.importedKwh)} kWh`],
+    ['Exported', `${formatKwh(report.totals.exportedKwh)} kWh`],
+    ['Net Balance', `${formatSignedKwh(report.totals.netKwh)} kWh`],
+    ['Battery Export', `${formatKwh(report.totals.batteryExportedKwh)} kWh`]
+  ];
+  summaryItems.forEach(([label, value]) => {
+    const item = document.createElement('div');
+    item.className = 'report-metric';
+    const span = document.createElement('span');
+    span.textContent = label;
+    const strong = document.createElement('strong');
+    strong.textContent = value;
+    item.append(span, strong);
+    els.reportSummary.append(item);
+  });
+
+  els.reportRows.replaceChildren();
+  renderReportTable(els.bucketRows, report.buckets || [], bucket => [
+    bucket.label,
+    bucket.window,
+    formatKwh(bucket.importedKwh),
+    formatKwh(bucket.exportedKwh),
+    formatSignedKwh(bucket.netKwh),
+    formatKwh(bucket.batteryExportedKwh),
+    formatKwh(bucket.solarExportedKwh),
+    formatKwh(bucket.batteryImportedFromGridKwh),
+    formatKwh(bucket.consumerImportedFromGridKwh)
+  ]);
+
+  renderReportTable(els.hourlyRows, report.hourly || [], hour => [
+    formatHourLabel(hour.hour),
+    String(hour.intervalCount || 0),
+    formatKwh(hour.importedKwh),
+    formatKwh(hour.exportedKwh),
+    formatSignedKwh(hour.netKwh),
+    formatKwh(hour.batteryExportedKwh),
+    formatKwh(hour.solarExportedKwh),
+    formatKwh(hour.batteryImportedFromGridKwh),
+    formatKwh(hour.consumerImportedFromGridKwh)
+  ]);
+
+  els.reportRows.replaceChildren();
+  report.days.forEach(day => {
+    const tr = document.createElement('tr');
+    [
+      day.date,
+      String(day.intervalCount || 0),
+      formatKwh(day.importedKwh),
+      formatKwh(day.exportedKwh),
+      formatSignedKwh(day.netKwh),
+      formatKwh(day.batteryExportedKwh),
+      formatKwh(day.solarExportedKwh),
+      formatKwh(day.batteryImportedFromGridKwh),
+      formatKwh(day.consumerImportedFromGridKwh)
+    ].forEach(value => {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.append(td);
+    });
+    els.reportRows.append(tr);
+  });
+
+  els.reportText.value = formatReportText(report);
+}
+
+function renderReportTable(tbody, rows, cellsForRow) {
+  tbody.replaceChildren();
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    cellsForRow(row).forEach(value => {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.append(td);
+    });
+    tbody.append(tr);
+  });
+}
+
+function formatReportText(report) {
+  const lines = [
+    `Tesla Net Billing Audit`,
+    `Site: ${report.siteId}`,
+    `Range: ${report.startDate} to ${report.endDate}`,
+    `Timezone: ${report.timeZone}`,
+    '',
+    `Totals`,
+    `  Grid Imported: ${formatKwh(report.totals.importedKwh)} kWh`,
+    `  Grid Exported: ${formatKwh(report.totals.exportedKwh)} kWh`,
+    `  Net Balance: ${formatSignedKwh(report.totals.netKwh)} kWh`,
+    `  Battery Export: ${formatKwh(report.totals.batteryExportedKwh)} kWh`,
+    `  Solar Export: ${formatKwh(report.totals.solarExportedKwh)} kWh`,
+    '',
+    `Time Windows`,
+    `Window              | Time        | Imported | Exported | Net     | Battery Export`
+  ];
+
+  (report.buckets || []).forEach(bucket => {
+    lines.push(`${padEnd(bucket.label, 19)} | ${padEnd(bucket.window, 11)} | ${pad(formatKwh(bucket.importedKwh), 8)} | ${pad(formatKwh(bucket.exportedKwh), 8)} | ${pad(formatSignedKwh(bucket.netKwh), 7)} | ${pad(formatKwh(bucket.batteryExportedKwh), 14)}`);
+  });
+
+  lines.push(
+    '',
+    `Hourly Detail`,
+    `Hour              | Imported | Exported | Net     | Battery Export | Solar Export`
+  );
+
+  (report.hourly || []).forEach(hour => {
+    lines.push(`${padEnd(formatHourLabel(hour.hour), 17)} | ${pad(formatKwh(hour.importedKwh), 8)} | ${pad(formatKwh(hour.exportedKwh), 8)} | ${pad(formatSignedKwh(hour.netKwh), 7)} | ${pad(formatKwh(hour.batteryExportedKwh), 14)} | ${formatKwh(hour.solarExportedKwh)}`);
+  });
+
+  lines.push(
+    '',
+    `Daily Detail`,
+    `Date        | Intervals | Imported | Exported | Net     | Battery Export | Solar Export`
+  );
+
+  report.days.forEach(day => {
+    lines.push(`${day.date}  | ${pad(day.intervalCount || 0, 9)} | ${pad(formatKwh(day.importedKwh), 8)} | ${pad(formatKwh(day.exportedKwh), 8)} | ${pad(formatSignedKwh(day.netKwh), 7)} | ${pad(formatKwh(day.batteryExportedKwh), 14)} | ${formatKwh(day.solarExportedKwh)}`);
+  });
+
+  return lines.join('\n');
+}
+
+function initReportDates() {
+  const today = new Date();
+  const start = new Date(today);
+  start.setDate(today.getDate() - 6);
+  els.reportStartDate.value = dateInputValue(start);
+  els.reportEndDate.value = dateInputValue(today);
+}
+
+function dateInputValue(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function formatKwh(value) {
+  return Number(value || 0).toFixed(2);
+}
+
+function formatSignedKwh(value) {
+  const numeric = Number(value || 0);
+  return `${numeric >= 0 ? '+' : ''}${numeric.toFixed(2)}`;
+}
+
+function pad(value, length) {
+  return String(value).padStart(length, ' ');
+}
+
+function padEnd(value, length) {
+  return String(value).padEnd(length, ' ');
+}
+
+function formatHourLabel(hour) {
+  if (!hour) return '';
+  const date = hour.slice(0, 10);
+  const hourText = hour.slice(11, 13);
+  return `${date} ${formatTime(`${hourText}:00`)}`;
+}
+
+function formatTime(hhmm) {
+  const [hourText, minuteText] = String(hhmm || '00:00').split(':');
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return hhmm || '--:--';
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  const hour12 = hour % 12 || 12;
+  return `${hour12}:${String(minute).padStart(2, '0')} ${suffix}`;
+}
+
+function modeLabel(api) {
+  return api === 'self_consumption' ? 'Self-Powered' : 'Time-Based Control';
+}
+
+function exportLabel(api) {
+  if (api === 'battery_ok') return 'Everything';
+  if (api === 'never') return 'None';
+  return 'Solar Only';
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  els.shareText.focus();
+  els.shareText.select();
+  document.execCommand('copy');
 }
 
 async function api(path, options = {}) {

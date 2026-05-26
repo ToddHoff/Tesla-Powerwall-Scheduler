@@ -16,7 +16,7 @@
     <string>/Users/toddhoff/tesla</string>
 
     <key>StartInterval</key>
-    <integer>1800</integer>
+    <integer>300</integer>
 
     <key>RunAtLoad</key>
     <true/>

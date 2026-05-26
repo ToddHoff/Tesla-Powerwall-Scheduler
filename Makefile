@@ -17,5 +17,8 @@ tag:
 	git push origin --tags
 
 
+copy:
+	cp ~/Library/LaunchAgents/com.toddhoff.tesla-run-due.plist .
+
 cleardefaults:
 	xcrun simctl --set previews delete all

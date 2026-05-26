@@ -1,6 +1,8 @@
 let config;
 let selectedScheduleId;
 let latestReport;
+let logOrder = 'desc';
+let lastLogs = [];
 
 const els = {
   viewButtons: [...document.querySelectorAll('.app-tabs button')],
@@ -40,6 +42,7 @@ const els = {
   reportText: document.querySelector('#reportText'),
   copyReportText: document.querySelector('#copyReportText'),
   refreshStatus: document.querySelector('#refreshStatus'),
+  logOrderToggle: document.querySelector('#logOrderToggle'),
   logOutput: document.querySelector('#logOutput')
 };
 
@@ -56,15 +59,17 @@ els.saveConfig.addEventListener('click', async () => {
     pendingText: 'Saving...',
     successText: 'Saved',
     statusEl: els.operationStatus,
-    pendingMessage: 'Saving configuration...',
-    successMessage: 'Configuration saved.',
+    pendingMessage: 'Saving configuration and reloading launchd jobs...',
     task: async () => {
       config = collectConfig();
       const saved = await api('/api/config', { method: 'POST', body: config });
-      config = saved;
+      const { launchd, ...nextConfig } = saved;
+      config = nextConfig;
       selectedScheduleId = selectedScheduleId || config.activeScheduleId;
       render();
       await refreshStatus();
+      const summary = summarizeLaunchd(launchd);
+      setStatus(els.operationStatus, `Configuration saved. ${summary}`, launchd?.ok === false ? 'error' : 'success');
     }
   });
 });
@@ -115,6 +120,13 @@ els.copyShareText.addEventListener('click', async () => {
 });
 
 els.refreshStatus.addEventListener('click', refreshStatus);
+
+els.logOrderToggle.addEventListener('click', () => {
+  logOrder = logOrder === 'desc' ? 'asc' : 'desc';
+  updateLogOrderToggle();
+  renderLogs();
+});
+updateLogOrderToggle();
 
 els.discoverSites.addEventListener('click', async () => {
   await runWithFeedback({
@@ -240,14 +252,17 @@ function renderScheduleSwitcher() {
         pendingText: 'Activating...',
         successText: 'Active',
         statusEl: els.operationStatus,
-        pendingMessage: `Activating ${schedule.name}...`,
-        successMessage: `${schedule.name} is now active.`,
+        pendingMessage: `Activating ${schedule.name} and reloading launchd jobs...`,
         task: async () => {
           config.activeScheduleId = schedule.id;
           selectedScheduleId = schedule.id;
-          config = await api('/api/config', { method: 'POST', body: collectConfig() });
+          const saved = await api('/api/config', { method: 'POST', body: collectConfig() });
+          const { launchd, ...nextConfig } = saved;
+          config = nextConfig;
           render();
           await refreshStatus();
+          const summary = summarizeLaunchd(launchd);
+          setStatus(els.operationStatus, `${schedule.name} is now active. ${summary}`, launchd?.ok === false ? 'error' : 'success');
         }
       });
     });
@@ -361,11 +376,29 @@ async function refreshStatus() {
     task: async () => {
       const status = await api('/api/status');
       els.nextRunText.textContent = status.nextRun || '--';
-      els.logOutput.textContent = status.logs
-        .map(entry => `${entry.ts} ${entry.level.toUpperCase()} ${entry.event}\n${JSON.stringify(entry.details, null, 2)}`)
-        .join('\n\n') || 'No activity yet.';
+      lastLogs = Array.isArray(status.logs) ? status.logs : [];
+      renderLogs();
     }
   });
+}
+
+function renderLogs() {
+  if (!lastLogs.length) {
+    els.logOutput.textContent = 'No activity yet.';
+    return;
+  }
+  const ordered = logOrder === 'desc' ? [...lastLogs].reverse() : lastLogs;
+  els.logOutput.textContent = ordered
+    .map(entry => `${entry.ts} ${entry.level.toUpperCase()} ${entry.event}\n${JSON.stringify(entry.details, null, 2)}`)
+    .join('\n\n');
+}
+
+function updateLogOrderToggle() {
+  if (!els.logOrderToggle) return;
+  els.logOrderToggle.textContent = logOrder === 'desc' ? 'Newest first' : 'Oldest first';
+  els.logOrderToggle.title = logOrder === 'desc'
+    ? 'Showing newest first — click for oldest first'
+    : 'Showing oldest first — click for newest first';
 }
 
 function selectedSchedule() {
@@ -659,6 +692,17 @@ function setStatus(element, message, state) {
   element.textContent = message;
   element.classList.remove('pending', 'success', 'error');
   element.classList.add(state);
+}
+
+function summarizeLaunchd(launchd) {
+  if (!launchd) return '';
+  if (launchd.ok === false) return `Launchd reload failed: ${launchd.error || 'unknown error'}`;
+  const parts = [];
+  if (launchd.added?.length) parts.push(`+${launchd.added.length} added`);
+  if (launchd.updated?.length) parts.push(`~${launchd.updated.length} updated`);
+  if (launchd.removed?.length) parts.push(`-${launchd.removed.length} removed`);
+  if (launchd.unchanged?.length && parts.length === 0) parts.push(`${launchd.unchanged.length} unchanged`);
+  return parts.length ? `Launchd: ${parts.join(', ')}.` : 'Launchd: no jobs.';
 }
 
 function clearStatusLater(element) {

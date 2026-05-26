@@ -12,7 +12,7 @@ const SCHEDULE_PATH = path.join(CONFIG_DIR, 'schedule.json');
 const SETTINGS_PATH = path.join(CONFIG_DIR, 'local-settings.json');
 const TOKENS_PATH = path.join(CONFIG_DIR, 'tokens.json');
 const RUN_STATE_PATH = path.join(CONFIG_DIR, 'run-state.json');
-const LOG_PATH = path.join(LOG_DIR, 'scheduler.log');
+const LEGACY_LOG_PATH = path.join(LOG_DIR, 'scheduler.log');
 const TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token';
 const REGION_BASE_URLS = {
   na: 'https://fleet-api.prd.na.vn.cloud.tesla.com',
@@ -20,11 +20,24 @@ const REGION_BASE_URLS = {
   cn: 'https://fleet-api.prd.cn.vn.cloud.tesla.cn'
 };
 
+// Verify timing. Tweak here if Tesla's gateway settle window changes.
+const VERIFY_SETTLE_MS = 45_000;
+const VERIFY_RETRY_MS = 60_000;
+const VERIFY_MAX_ATTEMPTS = 3;
+
+// Log path for the current run; set per step when --step is used.
+let LOG_PATH = LEGACY_LOG_PATH;
+
 await ensureFiles();
 const env = await loadEnvFile(path.join(APP_DIR, '.env'));
 const options = parseArgs();
 
 try {
+  if (options.step) {
+    const result = await runStep(options.step, { dryRun: options.dryRun });
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(result.ok ? 0 : 1);
+  }
   const result = await runDueSteps(options);
   console.log(JSON.stringify(result, null, 2));
   process.exit(result.errors.length ? 1 : 0);
@@ -46,6 +59,7 @@ function parseArgs() {
   return {
     dryRun: hasArg('--dry-run'),
     force: hasArg('--force'),
+    step: arg('--step'),
     at: arg('--at'),
     date: arg('--date'),
     windowMinutes: Number(arg('--window-minutes') || 3)
@@ -59,6 +73,174 @@ function arg(name) {
 
 function hasArg(name) {
   return process.argv.includes(name);
+}
+
+async function runStep(stepId, { dryRun }) {
+  const config = await readConfig();
+  const schedule = activeSchedule(config);
+  const step = (schedule.schedule || []).find(row => row.id === stepId);
+  if (!step) throw new Error(`Step "${stepId}" not found in active schedule "${schedule.id}".`);
+
+  // Per-step log file. Time is the unique key.
+  LOG_PATH = path.join(LOG_DIR, `run-${step.time.replace(':', '')}.log`);
+
+  await logEvent('info', 'step_start', {
+    source: 'launchd',
+    scheduleId: schedule.id,
+    id: step.id,
+    time: step.time,
+    dryRun
+  });
+
+  if (dryRun) {
+    const requests = buildRequests(step, config.tesla.energySiteId || '{energy_site_id}');
+    await logEvent('info', 'dry_run', { id: step.id, requests });
+    return { ok: true, dryRun: true, id: step.id, requests };
+  }
+
+  const applied = await applyStep(step, config);
+  const verification = await verifyWithRetry(step, config);
+
+  if (verification.ok) {
+    await logEvent('info', 'step_verified', {
+      id: step.id,
+      time: step.time,
+      attempts: verification.attempts,
+      observed: verification.observed
+    });
+  } else {
+    await logEvent('error', 'verify_failed', {
+      id: step.id,
+      time: step.time,
+      attempts: verification.attempts,
+      mismatched: verification.mismatched,
+      observed: verification.observed
+    });
+  }
+
+  return {
+    ok: verification.ok,
+    id: step.id,
+    time: step.time,
+    applied,
+    verification
+  };
+}
+
+function buildRequests(step, energySiteId) {
+  return [
+    {
+      name: 'backup',
+      path: `/api/1/energy_sites/${energySiteId}/backup`,
+      body: { backup_reserve_percent: step.backupReservePercent }
+    },
+    {
+      name: 'operation',
+      path: `/api/1/energy_sites/${energySiteId}/operation`,
+      body: { default_real_mode: step.operationModeApi }
+    },
+    {
+      name: 'grid_import_export',
+      path: `/api/1/energy_sites/${energySiteId}/grid_import_export`,
+      body: {
+        customer_preferred_export_rule: step.energyExportsApi,
+        disallow_charge_from_grid_with_solar_installed: !step.gridCharging
+      }
+    }
+  ];
+}
+
+async function applyStep(step, config) {
+  const energySiteId = config.tesla.energySiteId;
+  requireTeslaSetting(energySiteId, 'Energy site ID');
+  const requests = buildRequests(step, energySiteId);
+  return postRequests(requests);
+}
+
+async function postRequests(requests) {
+  const responses = [];
+  for (const request of requests) {
+    const response = await teslaFetch(request.path, {
+      method: 'POST',
+      body: JSON.stringify(request.body)
+    });
+    responses.push({ name: request.name, response });
+  }
+  return responses;
+}
+
+async function verifyWithRetry(step, config) {
+  const desired = {
+    backup_reserve_percent: step.backupReservePercent,
+    default_real_mode: step.operationModeApi,
+    customer_preferred_export_rule: step.energyExportsApi,
+    disallow_charge_from_grid_with_solar_installed: !step.gridCharging
+  };
+
+  for (let attempt = 1; attempt <= VERIFY_MAX_ATTEMPTS; attempt += 1) {
+    await sleep(attempt === 1 ? VERIFY_SETTLE_MS : VERIFY_RETRY_MS);
+    const observed = await readSiteInfo(config);
+    const mismatched = diffFields(desired, observed);
+
+    if (mismatched.length === 0) {
+      return { ok: true, attempts: attempt, observed };
+    }
+
+    await logEvent('warn', 'verify_mismatch', {
+      id: step.id,
+      attempt,
+      mismatched,
+      observed
+    });
+
+    if (attempt === VERIFY_MAX_ATTEMPTS) {
+      return { ok: false, attempts: attempt, observed, mismatched };
+    }
+
+    // Re-POST only the mismatched fields. Path-per-field so we don't redo settled work.
+    const energySiteId = config.tesla.energySiteId;
+    const retryRequests = buildRequests(step, energySiteId).filter(request => {
+      if (request.name === 'backup') return mismatched.some(m => m.field === 'backup_reserve_percent');
+      if (request.name === 'operation') return mismatched.some(m => m.field === 'default_real_mode');
+      if (request.name === 'grid_import_export') {
+        return mismatched.some(m =>
+          m.field === 'customer_preferred_export_rule' ||
+          m.field === 'disallow_charge_from_grid_with_solar_installed'
+        );
+      }
+      return false;
+    });
+    await postRequests(retryRequests);
+  }
+
+  return { ok: false, attempts: VERIFY_MAX_ATTEMPTS, observed: null, mismatched: [] };
+}
+
+async function readSiteInfo(config) {
+  const energySiteId = config.tesla.energySiteId;
+  const raw = await teslaFetch(`/api/1/energy_sites/${energySiteId}/site_info`);
+  const response = raw?.response || {};
+  const components = response.components || {};
+  return {
+    backup_reserve_percent: response.backup_reserve_percent,
+    default_real_mode: response.default_real_mode,
+    customer_preferred_export_rule: components.customer_preferred_export_rule,
+    disallow_charge_from_grid_with_solar_installed: components.disallow_charge_from_grid_with_solar_installed
+  };
+}
+
+function diffFields(desired, observed) {
+  const out = [];
+  for (const field of Object.keys(desired)) {
+    if (desired[field] !== observed?.[field]) {
+      out.push({ field, desired: desired[field], observed: observed?.[field] });
+    }
+  }
+  return out;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function runDueSteps({ dryRun, force, at, date, windowMinutes }) {
@@ -100,8 +282,11 @@ async function runDueSteps({ dryRun, force, at, date, windowMinutes }) {
     }
 
     try {
-      const result = await applyStep(step, { dryRun, source: 'one-shot' });
-      summary.matched.push({ id: step.id, time: step.time, result });
+      const config2 = await readConfig();
+      const applied = dryRun
+        ? { ok: true, dryRun: true, requests: buildRequests(step, config2.tesla.energySiteId || '{energy_site_id}') }
+        : await applyStep(step, config2);
+      summary.matched.push({ id: step.id, time: step.time, applied });
       if (!dryRun) {
         runState[key] = new Date().toISOString();
         await writeJson(RUN_STATE_PATH, runState);
@@ -155,60 +340,6 @@ function zonedParts(date, timezone) {
     date: `${parts.year}-${parts.month}-${parts.day}`,
     hhmm: `${hour}:${parts.minute}`
   };
-}
-
-async function applyStep(step, { dryRun, source }) {
-  const config = await readConfig();
-  const energySiteId = config.tesla.energySiteId || (dryRun ? '{energy_site_id}' : '');
-  requireTeslaSetting(energySiteId, 'Energy site ID');
-
-  const requests = [
-    {
-      name: 'backup',
-      path: `/api/1/energy_sites/${energySiteId}/backup`,
-      body: { backup_reserve_percent: step.backupReservePercent }
-    },
-    {
-      name: 'operation',
-      path: `/api/1/energy_sites/${energySiteId}/operation`,
-      body: { default_real_mode: step.operationModeApi }
-    },
-    {
-      name: 'grid_import_export',
-      path: `/api/1/energy_sites/${energySiteId}/grid_import_export`,
-      body: {
-        customer_preferred_export_rule: step.energyExportsApi,
-        disallow_charge_from_grid_with_solar_installed: !step.gridCharging
-      }
-    }
-  ];
-
-  if (dryRun) {
-    await logEvent('info', 'dry_run', { source, id: step.id, requests });
-    return { ok: true, dryRun: true, requests };
-  }
-
-  const responses = [];
-  for (const request of requests) {
-    const response = await teslaFetch(request.path, {
-      method: 'POST',
-      body: JSON.stringify(request.body)
-    });
-    responses.push({ name: request.name, response });
-  }
-
-  await logEvent('info', 'step_applied', {
-    source,
-    id: step.id,
-    time: step.time,
-    backupReservePercent: step.backupReservePercent,
-    operationModeApi: step.operationModeApi,
-    energyExportsApi: step.energyExportsApi,
-    gridCharging: step.gridCharging,
-    responses
-  });
-
-  return { ok: true, dryRun: false, responses };
 }
 
 async function teslaFetch(pathname, requestOptions = {}) {

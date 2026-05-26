@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { reconcileLaunchd, removeLegacyPlist } from './scripts/launchd-reconcile.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = path.join(__dirname, 'config');
@@ -31,8 +32,6 @@ const CONTENT_TYPES = {
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml'
 };
-
-let schedulerTimer;
 
 await ensureFiles();
 const env = await loadEnvFile(path.join(__dirname, '.env'));
@@ -64,7 +63,9 @@ server.listen(port, () => {
   console.log(`Tesla scheduler running at http://localhost:${port}`);
 });
 
-startScheduler();
+await migrateAndReconcileOnStartup().catch(error => {
+  logEvent('error', 'startup_reconcile_failed', { message: error.message, stack: error.stack });
+});
 
 async function ensureFiles() {
   await mkdir(CONFIG_DIR, { recursive: true });
@@ -172,7 +173,32 @@ async function saveConfig(req, res) {
   await writeJson(SCHEDULE_PATH, next);
   await writeJson(SETTINGS_PATH, localSettings);
   await logEvent('info', 'config_saved', { rows: next.schedule.length });
-  return sendJson(res, await getPublicConfig());
+
+  const launchd = await reconcileSafe(activeSchedule(normalizedIncoming));
+  return sendJson(res, { ...(await getPublicConfig()), launchd });
+}
+
+async function reconcileSafe(schedule) {
+  try {
+    const result = await reconcileLaunchd({
+      schedule,
+      appDir: __dirname,
+      nodeBin: process.execPath,
+      logDir: LOG_DIR
+    });
+    await logEvent('info', 'launchd_reconciled', result);
+    return { ok: true, ...result };
+  } catch (error) {
+    await logEvent('error', 'launchd_reconcile_failed', { message: error.message });
+    return { ok: false, error: error.message };
+  }
+}
+
+async function migrateAndReconcileOnStartup() {
+  const removed = await removeLegacyPlist();
+  if (removed) await logEvent('info', 'legacy_plist_removed', {});
+  const config = await readConfig();
+  await reconcileSafe(activeSchedule(config));
 }
 
 function normalizeSchedule(rows) {
@@ -745,35 +771,6 @@ async function runManual(url, res) {
   if (!step) return sendJson(res, { error: 'Schedule row not found.' }, 404);
   const result = await applyStep(step, { dryRun, source: 'manual' });
   return sendJson(res, result);
-}
-
-function startScheduler() {
-  clearInterval(schedulerTimer);
-  schedulerTimer = setInterval(() => {
-    runDueSteps().catch(error => logEvent('error', 'scheduler_failed', { message: error.message }));
-  }, 30_000);
-  runDueSteps().catch(error => logEvent('error', 'scheduler_failed', { message: error.message }));
-}
-
-async function runDueSteps() {
-  const config = await readConfig();
-  const now = zonedParts(new Date(), config.timezone || 'America/Los_Angeles');
-  const currentSchedule = activeSchedule(config);
-
-  const runState = await readJson(RUN_STATE_PATH, {});
-  for (const step of currentSchedule.schedule || []) {
-    if (!step.enabled || step.time !== now.hhmm) continue;
-    const key = `${currentSchedule.id}:${step.id}:${now.date}`;
-    if (runState[key]) continue;
-
-    try {
-      await applyStep(step, { dryRun: false, source: 'scheduler' });
-      runState[key] = new Date().toISOString();
-      await writeJson(RUN_STATE_PATH, runState);
-    } catch (error) {
-      await logEvent('error', 'scheduled_step_failed', { id: step.id, message: error.message });
-    }
-  }
 }
 
 function zonedParts(date, timezone) {

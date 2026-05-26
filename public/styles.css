@@ -271,6 +271,71 @@ h2 {
   align-items: center;
 }
 
+.muted-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-subhead {
+  margin-top: 18px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 18px;
+  row-gap: 6px;
+  margin: 0 0 6px;
+}
+
+.settings-grid dt {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.settings-grid dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-raw {
+  margin-top: 14px;
+}
+
+.settings-raw summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+.settings-raw pre {
+  max-height: 320px;
+  overflow: auto;
+}
+
+tr.peak-import-flag td {
+  background: rgba(220, 60, 60, 0.18);
+}
+
+tr.totals-row td {
+  font-weight: 600;
+  border-top: 1px solid var(--muted);
+}
+
+.cost-positive {
+  color: rgb(220, 110, 110);
+}
+
+.cost-negative {
+  color: rgb(110, 200, 130);
+}
+
 .schedule-switcher {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

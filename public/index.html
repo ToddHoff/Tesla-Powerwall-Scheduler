@@ -33,7 +33,9 @@
 
       <nav class="app-tabs" aria-label="Views">
         <button class="active" data-view="schedules">Schedules</button>
-        <button data-view="reports">Reports</button>
+        <button data-view="net-billing">Net Billing</button>
+        <button data-view="tou-cost">TOU Cost</button>
+        <button data-view="settings">Settings</button>
         <button data-view="activity">Activity</button>
       </nav>
 
@@ -119,14 +121,7 @@
         </section>
       </section>
 
-      <section id="reportsView" class="view-panel panel report-panel hidden">
-        <div class="section-head">
-          <div>
-            <h2>Reports</h2>
-            <p>Audit schedule performance using Tesla energy history.</p>
-          </div>
-        </div>
-
+      <section id="netBillingView" class="view-panel panel report-panel hidden">
         <div class="report-card">
           <div class="section-head compact">
             <div>
@@ -238,6 +233,126 @@
           </div>
           <textarea id="reportText" readonly rows="12" spellcheck="false"></textarea>
         </div>
+      </section>
+
+      <section id="touCostView" class="view-panel panel report-panel hidden">
+        <div class="report-card">
+          <div class="section-head compact">
+            <div>
+              <h2>TOU Cost Audit</h2>
+              <p>PG&amp;E TOU-C rates applied to grid imports and exports. Peak window audit shows whether the battery covered the 4–9 PM load.</p>
+            </div>
+            <button id="runTouReport" class="primary">Run Report</button>
+          </div>
+
+          <div class="report-controls">
+            <label>
+              Start Date
+              <input id="touStartDate" type="date" />
+            </label>
+            <label>
+              End Date
+              <input id="touEndDate" type="date" />
+            </label>
+            <label>
+              Timezone
+              <input id="touTimeZone" value="America/Los_Angeles" spellcheck="false" />
+            </label>
+          </div>
+
+          <div id="touStatus" class="operation-status" aria-live="polite"></div>
+          <div id="touSummary" class="report-summary"></div>
+          <div id="touTariffNote" class="muted-meta"></div>
+
+          <div class="section-head compact report-subhead">
+            <div>
+              <h2>Daily PG&amp;E Cost by TOU Period</h2>
+              <p>Off-Peak and On-Peak (4–9 PM every day) imports priced from Tesla's tariff_content.</p>
+            </div>
+          </div>
+          <div class="table-wrap report-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Season</th>
+                  <th>Off-Peak kWh</th>
+                  <th>Off-Peak $</th>
+                  <th>Peak kWh</th>
+                  <th>Peak $</th>
+                  <th>Export Credit</th>
+                  <th>Net $</th>
+                </tr>
+              </thead>
+              <tbody id="touCostRows"></tbody>
+              <tfoot id="touCostTotals"></tfoot>
+            </table>
+          </div>
+
+          <div class="section-head compact report-subhead">
+            <div>
+              <h2>Peak Window Audit (4–9 PM)</h2>
+              <p>Rows highlight red if any peak-hour grid import (&gt; 0.1 kWh) occurred — that means the schedule failed to keep load off the grid.</p>
+            </div>
+          </div>
+          <div class="table-wrap report-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Peak Import kWh</th>
+                  <th>Peak Import $</th>
+                  <th>SOE @ 4 PM</th>
+                  <th>SOE min</th>
+                  <th>SOE @ 9 PM</th>
+                  <th>% Load From Battery</th>
+                  <th>Peak Export kWh</th>
+                </tr>
+              </thead>
+              <tbody id="touAuditRows"></tbody>
+            </table>
+          </div>
+
+          <div class="section-head compact report-text-head">
+            <div>
+              <h2>Shareable Report</h2>
+              <p>Plain-text summary with explanation of what to look for. Updates each time the report runs.</p>
+            </div>
+            <button id="copyTouReportText">Copy</button>
+          </div>
+          <textarea id="touReportText" readonly rows="20" spellcheck="false"></textarea>
+        </div>
+      </section>
+
+      <section id="settingsView" class="view-panel panel hidden">
+        <div class="section-head">
+          <div>
+            <h2>Current Settings</h2>
+            <p>What the Powerwall gateway reports right now via the Fleet API.</p>
+          </div>
+          <div class="row-actions">
+            <span id="settingsFetchedAt" class="muted-meta"></span>
+            <button id="settingsRefresh">Refresh</button>
+          </div>
+        </div>
+
+        <div id="settingsError" class="operation-status" aria-live="polite"></div>
+
+        <h3 class="settings-subhead">Managed by scheduler</h3>
+        <dl id="settingsManaged" class="settings-grid"></dl>
+
+        <h3 class="settings-subhead">Live snapshot</h3>
+        <dl id="settingsLive" class="settings-grid"></dl>
+
+        <details open class="settings-raw">
+          <summary>Raw site_info</summary>
+          <pre id="settingsRawSiteInfo"></pre>
+        </details>
+
+        <details open class="settings-raw">
+          <summary>Raw live_status</summary>
+          <pre id="settingsRawLive"></pre>
+        </details>
       </section>
 
       <section id="activityView" class="view-panel panel log-panel hidden">

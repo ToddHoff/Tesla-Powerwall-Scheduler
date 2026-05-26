@@ -3,12 +3,23 @@ let selectedScheduleId;
 let latestReport;
 let logOrder = 'desc';
 let lastLogs = [];
+let settingsFetched = false;
+let lastSettings = null;
 
 const els = {
   viewButtons: [...document.querySelectorAll('.app-tabs button')],
   schedulesView: document.querySelector('#schedulesView'),
-  reportsView: document.querySelector('#reportsView'),
+  netBillingView: document.querySelector('#netBillingView'),
+  touCostView: document.querySelector('#touCostView'),
+  settingsView: document.querySelector('#settingsView'),
   activityView: document.querySelector('#activityView'),
+  settingsRefresh: document.querySelector('#settingsRefresh'),
+  settingsFetchedAt: document.querySelector('#settingsFetchedAt'),
+  settingsError: document.querySelector('#settingsError'),
+  settingsManaged: document.querySelector('#settingsManaged'),
+  settingsLive: document.querySelector('#settingsLive'),
+  settingsRawSiteInfo: document.querySelector('#settingsRawSiteInfo'),
+  settingsRawLive: document.querySelector('#settingsRawLive'),
   connectionPill: document.querySelector('#connectionPill'),
   seasonText: document.querySelector('#seasonText'),
   nextRunText: document.querySelector('#nextRunText'),
@@ -41,6 +52,18 @@ const els = {
   reportRows: document.querySelector('#reportRows'),
   reportText: document.querySelector('#reportText'),
   copyReportText: document.querySelector('#copyReportText'),
+  runTouReport: document.querySelector('#runTouReport'),
+  touStartDate: document.querySelector('#touStartDate'),
+  touEndDate: document.querySelector('#touEndDate'),
+  touTimeZone: document.querySelector('#touTimeZone'),
+  touStatus: document.querySelector('#touStatus'),
+  touSummary: document.querySelector('#touSummary'),
+  touTariffNote: document.querySelector('#touTariffNote'),
+  touCostRows: document.querySelector('#touCostRows'),
+  touCostTotals: document.querySelector('#touCostTotals'),
+  touAuditRows: document.querySelector('#touAuditRows'),
+  touReportText: document.querySelector('#touReportText'),
+  copyTouReportText: document.querySelector('#copyTouReportText'),
   refreshStatus: document.querySelector('#refreshStatus'),
   logOrderToggle: document.querySelector('#logOrderToggle'),
   logOutput: document.querySelector('#logOutput')
@@ -92,6 +115,19 @@ els.addRow.addEventListener('click', () => {
 });
 
 els.runNetBillingReport.addEventListener('click', runNetBillingReport);
+els.runTouReport.addEventListener('click', runTouReport);
+
+els.copyTouReportText.addEventListener('click', async () => {
+  await runWithFeedback({
+    buttons: [els.copyTouReportText],
+    pendingText: 'Copying...',
+    successText: 'Copy',
+    statusEl: els.touStatus,
+    pendingMessage: 'Copying report...',
+    successMessage: 'Copied report.',
+    task: async () => copyText(els.touReportText.value)
+  });
+});
 
 els.copyReportText.addEventListener('click', async () => {
   await runWithFeedback({
@@ -127,6 +163,109 @@ els.logOrderToggle.addEventListener('click', () => {
   renderLogs();
 });
 updateLogOrderToggle();
+
+els.settingsRefresh.addEventListener('click', refreshSettings);
+
+async function refreshSettings() {
+  await runWithFeedback({
+    buttons: [els.settingsRefresh],
+    pendingText: 'Loading...',
+    successText: 'Refresh',
+    statusEl: els.settingsError,
+    pendingMessage: '',
+    successMessage: '',
+    task: async () => {
+      const result = await api('/api/live-status');
+      lastSettings = { ...result, fetchedAt: new Date() };
+      settingsFetched = true;
+      renderSettings();
+    }
+  });
+}
+
+function renderSettings() {
+  if (!lastSettings) return;
+  const siteInfo = lastSettings.siteInfo?.response || {};
+  const components = siteInfo.components || {};
+  const live = lastSettings.live?.response || {};
+
+  els.settingsFetchedAt.textContent = `Fetched ${formatClockTime(lastSettings.fetchedAt)}`;
+
+  setManagedRows([
+    ['Backup reserve', formatPercent(siteInfo.backup_reserve_percent)],
+    ['Operation mode', formatOperationMode(siteInfo.default_real_mode)],
+    ['Energy exports', formatExportRule(components.customer_preferred_export_rule)],
+    ['Grid charging from solar-installed', formatGridChargingAllowed(components.disallow_charge_from_grid_with_solar_installed)]
+  ]);
+
+  setManagedRows([
+    ['Charge level', formatPercent(live.percentage_charged)],
+    ['Battery power', formatPower(live.battery_power)],
+    ['Solar power', formatPower(live.solar_power)],
+    ['Load power', formatPower(live.load_power)],
+    ['Grid power', formatPower(live.grid_power)],
+    ['Grid status', formatStringOrDash(live.grid_status)],
+    ['Island status', formatStringOrDash(live.island_status)],
+    ['Reported at', formatTimestamp(live.timestamp)]
+  ], els.settingsLive);
+
+  els.settingsRawSiteInfo.textContent = JSON.stringify(lastSettings.siteInfo, null, 2);
+  els.settingsRawLive.textContent = JSON.stringify(lastSettings.live, null, 2);
+}
+
+function setManagedRows(rows, target = els.settingsManaged) {
+  target.replaceChildren();
+  for (const [label, value] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = label;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    target.append(dt, dd);
+  }
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
+  return `${Math.round(Number(value) * 10) / 10}%`;
+}
+
+function formatPower(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
+  return `${Math.round(Number(value))} W`;
+}
+
+function formatOperationMode(api) {
+  if (!api) return '—';
+  const label = api === 'self_consumption' ? 'Self-Powered' : api === 'autonomous' ? 'Time-Based Control' : api;
+  return `${label} (${api})`;
+}
+
+function formatExportRule(api) {
+  if (!api) return '—';
+  const label = api === 'battery_ok' ? 'Everything' : api === 'never' ? 'None' : api === 'pv_only' ? 'Solar Only' : api;
+  return `${label} (${api})`;
+}
+
+function formatGridChargingAllowed(disallow) {
+  if (disallow === null || disallow === undefined) return '—';
+  return disallow ? 'Disallowed (disallow_charge_from_grid_with_solar_installed = true)' : 'Allowed (disallow_charge_from_grid_with_solar_installed = false)';
+}
+
+function formatStringOrDash(value) {
+  return value === null || value === undefined || value === '' ? '—' : String(value);
+}
+
+function formatTimestamp(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleString();
+}
+
+function formatClockTime(date) {
+  if (!(date instanceof Date)) return '';
+  return date.toLocaleTimeString();
+}
 
 els.discoverSites.addEventListener('click', async () => {
   await runWithFeedback({
@@ -175,8 +314,13 @@ function setView(view) {
   const selected = view || 'schedules';
   els.viewButtons.forEach(button => button.classList.toggle('active', button.dataset.view === selected));
   els.schedulesView.classList.toggle('hidden', selected !== 'schedules');
-  els.reportsView.classList.toggle('hidden', selected !== 'reports');
+  els.netBillingView.classList.toggle('hidden', selected !== 'net-billing');
+  els.touCostView.classList.toggle('hidden', selected !== 'tou-cost');
+  els.settingsView.classList.toggle('hidden', selected !== 'settings');
   els.activityView.classList.toggle('hidden', selected !== 'activity');
+  if (selected === 'settings' && !settingsFetched) {
+    refreshSettings();
+  }
 }
 
 function render() {
@@ -434,6 +578,208 @@ function renderShareText() {
   els.shareText.value = lines.join('\n').trimEnd();
 }
 
+async function runTouReport() {
+  await runWithFeedback({
+    buttons: [els.runTouReport],
+    pendingText: 'Running...',
+    successText: 'Run Report',
+    statusEl: els.touStatus,
+    pendingMessage: 'Fetching energy history and applying PG&E rates...',
+    successMessage: 'Report complete.',
+    task: async () => {
+      const params = new URLSearchParams({
+        startDate: els.touStartDate.value,
+        endDate: els.touEndDate.value,
+        timeZone: els.touTimeZone.value.trim() || 'America/Los_Angeles'
+      });
+      const report = await api(`/api/reports/tou-cost?${params}`);
+      renderTouReport(report);
+    }
+  });
+}
+
+function renderTouReport(report) {
+  els.touSummary.replaceChildren();
+  const totals = report.totals || {};
+  const summary = [
+    ['Net Cost', formatCurrency(totals.netCost)],
+    ['Import Cost', formatCurrency(totals.importCost)],
+    ['Export Credit', formatCurrency(totals.exportCredit)],
+    ['Peak Import kWh', formatKwh(totals.peakImportKwh)],
+    ['Peak Import Cost', formatCurrency(totals.peakImportCost)],
+    ['% Peak Load From Battery', totals.peakAudit?.percentLoadFromBattery == null ? '—' : `${totals.peakAudit.percentLoadFromBattery}%`]
+  ];
+  for (const [label, value] of summary) {
+    const item = document.createElement('div');
+    item.className = 'report-metric';
+    const s = document.createElement('span'); s.textContent = label;
+    const v = document.createElement('strong'); v.textContent = value;
+    item.append(s, v);
+    els.touSummary.append(item);
+  }
+
+  els.touTariffNote.textContent = report.tariff
+    ? `Tariff: ${report.tariff.code || '(unnamed)'} — ${report.tariff.utility || ''}. Sell rate from sell_tariff; NEM 3.0 actual export values may differ.`
+    : '';
+
+  els.touCostRows.replaceChildren();
+  for (const day of report.days || []) {
+    const offPeak = day.periods?.find(p => p.period === 'OFF_PEAK') || { importedKwh: 0, importCost: 0 };
+    const onPeak = day.periods?.find(p => p.period === 'ON_PEAK') || { importedKwh: 0, importCost: 0 };
+    const tr = document.createElement('tr');
+    appendCells(tr, [
+      day.date,
+      day.seasonLabel || '',
+      formatKwh(offPeak.importedKwh),
+      formatCurrency(offPeak.importCost),
+      formatKwh(onPeak.importedKwh),
+      formatCurrency(onPeak.importCost),
+      formatCurrency(day.exportCredit),
+      formatCurrency(day.netCost)
+    ]);
+    els.touCostRows.append(tr);
+  }
+
+  els.touCostTotals.replaceChildren();
+  if (report.days?.length) {
+    const tr = document.createElement('tr');
+    tr.className = 'totals-row';
+    const offPeakTotal = report.totals?.periodTotals?.OFF_PEAK || { importedKwh: 0, importCost: 0 };
+    const onPeakTotal = report.totals?.periodTotals?.ON_PEAK || { importedKwh: 0, importCost: 0 };
+    appendCells(tr, [
+      'Totals',
+      '',
+      formatKwh(offPeakTotal.importedKwh),
+      formatCurrency(offPeakTotal.importCost),
+      formatKwh(onPeakTotal.importedKwh),
+      formatCurrency(onPeakTotal.importCost),
+      formatCurrency(report.totals?.exportCredit ?? 0),
+      formatCurrency(report.totals?.netCost ?? 0)
+    ]);
+    els.touCostTotals.append(tr);
+  }
+
+  els.touAuditRows.replaceChildren();
+  for (const day of report.days || []) {
+    const audit = day.peakAudit || {};
+    const tr = document.createElement('tr');
+    if (day.peakImportKwh > 0.1) tr.classList.add('peak-import-flag');
+    appendCells(tr, [
+      day.date,
+      formatKwh(day.peakImportKwh),
+      formatCurrency(day.peakImportCost),
+      audit.soeAtPeakStart == null ? '—' : `${audit.soeAtPeakStart}%`,
+      audit.soeMinDuringPeak == null ? '—' : `${audit.soeMinDuringPeak}%`,
+      audit.soeAtPeakEnd == null ? '—' : `${audit.soeAtPeakEnd}%`,
+      audit.percentLoadFromBattery == null ? '—' : `${audit.percentLoadFromBattery}%`,
+      formatKwh(day.peakExportKwh)
+    ]);
+    els.touAuditRows.append(tr);
+  }
+
+  els.touReportText.value = formatTouReportText(report);
+}
+
+function formatTouReportText(report) {
+  const totals = report.totals || {};
+  const peakDays = (report.days || []).filter(d => d.peakImportKwh > 0.1);
+  const offPeakTotal = report.totals?.periodTotals?.OFF_PEAK || { importedKwh: 0, importCost: 0 };
+  const onPeakTotal = report.totals?.periodTotals?.ON_PEAK || { importedKwh: 0, importCost: 0 };
+  const tariffLabel = report.tariff?.code || '(unknown)';
+
+  const verdict = peakDays.length === 0
+    ? `No days had material peak-hour grid imports (> 0.1 kWh). The schedule kept load off the grid during the 4–9 PM peak window.`
+    : `${peakDays.length} day(s) had measurable peak-hour grid imports (> 0.1 kWh): ${peakDays.map(d => d.date).join(', ')}. ` +
+      `On those days the battery did not fully carry the home through the 4–9 PM peak — check whether SOE hit the reserve floor early.`;
+
+  const lines = [
+    'Tesla Powerwall — TOU Cost Audit',
+    `Site: ${report.siteId}`,
+    `Range: ${report.startDate} to ${report.endDate}   (${(report.days || []).length} day(s))`,
+    `Timezone: ${report.timeZone}`,
+    `Tariff: ${tariffLabel} — ${report.tariff?.utility || ''}`.trim(),
+    '',
+    'WHAT THIS REPORT SHOWS',
+    'Under PG&E TOU-C, electricity is more expensive 4–9 PM every day ("Peak")',
+    'and cheaper at all other hours ("Off-Peak"). The scheduler keeps the Powerwall',
+    'topped up during off-peak so the battery — not the grid — serves the home',
+    'during peak. This report measures whether that strategy is actually working,',
+    'in dollars.',
+    '',
+    'WHAT TO LOOK FOR',
+    '  1. "Peak Import $" should be near $0. Any meaningful peak-hour grid import',
+    '     means the battery ran out, the schedule didn\'t apply, or load exceeded',
+    '     what the system could cover. Days above 0.1 kWh are flagged in the UI.',
+    '  2. "SOE @ 9 PM" should be comfortably above the reserve floor (currently',
+    '     30% summer / 50% winter). If SOE drops to the floor before 9 PM, the',
+    '     battery is undersized for that day\'s load or didn\'t fully recharge',
+    '     overnight — bump backup reserve, or check that the midnight grid-charge',
+    '     step ran.',
+    '  3. "% Load From Battery" during peak hours — higher is better. The',
+    '     remainder is typically solar (good) or grid (bad).',
+    '',
+    'CAVEAT ON EXPORT CREDITS',
+    'Export credit uses Tesla\'s flat sell_tariff rate (the rate Tesla has on file),',
+    'not the hourly NEM 3.0 / NBT avoided-cost values PG&E actually pays. Real',
+    'export credits can be much higher during summer peak hours. Treat the export',
+    'number as a conservative floor.',
+    '',
+    'SUMMARY',
+    `  Net cost (period):           ${formatCurrency(totals.netCost)}`,
+    `  Import cost:                 ${formatCurrency(totals.importCost)}`,
+    `  Export credit:               ${formatCurrency(totals.exportCredit)}`,
+    `  Off-peak import:             ${formatKwh(offPeakTotal.importedKwh)} kWh  (${formatCurrency(offPeakTotal.importCost)})`,
+    `  Peak import:                 ${formatKwh(onPeakTotal.importedKwh)} kWh  (${formatCurrency(onPeakTotal.importCost)})`,
+    `  % peak load from battery:    ${totals.peakAudit?.percentLoadFromBattery == null ? '—' : `${totals.peakAudit.percentLoadFromBattery}%`}`,
+    '',
+    'VERDICT',
+    `  ${verdict}`,
+    '',
+    'DAILY PG&E COST BY TOU PERIOD',
+    `${padEnd('Date', 12)} ${padEnd('Season', 8)} ${pad('OffPk kWh', 10)} ${pad('OffPk $', 10)} ${pad('Peak kWh', 10)} ${pad('Peak $', 10)} ${pad('Export $', 10)} ${pad('Net $', 10)}`
+  ];
+
+  for (const day of report.days || []) {
+    const off = day.periods?.find(p => p.period === 'OFF_PEAK') || { importedKwh: 0, importCost: 0 };
+    const on = day.periods?.find(p => p.period === 'ON_PEAK') || { importedKwh: 0, importCost: 0 };
+    lines.push(
+      `${padEnd(day.date, 12)} ${padEnd(day.seasonLabel || '', 8)} ${pad(formatKwh(off.importedKwh), 10)} ${pad(formatCurrency(off.importCost), 10)} ${pad(formatKwh(on.importedKwh), 10)} ${pad(formatCurrency(on.importCost), 10)} ${pad(formatCurrency(day.exportCredit), 10)} ${pad(formatCurrency(day.netCost), 10)}`
+    );
+  }
+  lines.push(
+    `${padEnd('TOTALS', 12)} ${padEnd('', 8)} ${pad(formatKwh(offPeakTotal.importedKwh), 10)} ${pad(formatCurrency(offPeakTotal.importCost), 10)} ${pad(formatKwh(onPeakTotal.importedKwh), 10)} ${pad(formatCurrency(onPeakTotal.importCost), 10)} ${pad(formatCurrency(totals.exportCredit ?? 0), 10)} ${pad(formatCurrency(totals.netCost ?? 0), 10)}`
+  );
+
+  lines.push(
+    '',
+    'PEAK WINDOW AUDIT (4–9 PM)',
+    `${padEnd('Date', 12)} ${pad('Peak kWh', 9)} ${pad('Peak $', 9)} ${pad('@4PM', 6)} ${pad('Min', 6)} ${pad('@9PM', 6)} ${pad('%BatLoad', 9)} ${pad('Export kWh', 11)}  Flag`
+  );
+  for (const day of report.days || []) {
+    const a = day.peakAudit || {};
+    const flag = day.peakImportKwh > 0.1 ? '⚠ peak import' : '';
+    lines.push(
+      `${padEnd(day.date, 12)} ${pad(formatKwh(day.peakImportKwh), 9)} ${pad(formatCurrency(day.peakImportCost), 9)} ${pad(a.soeAtPeakStart == null ? '—' : `${a.soeAtPeakStart}%`, 6)} ${pad(a.soeMinDuringPeak == null ? '—' : `${a.soeMinDuringPeak}%`, 6)} ${pad(a.soeAtPeakEnd == null ? '—' : `${a.soeAtPeakEnd}%`, 6)} ${pad(a.percentLoadFromBattery == null ? '—' : `${a.percentLoadFromBattery}%`, 9)} ${pad(formatKwh(day.peakExportKwh), 11)}  ${flag}`
+    );
+  }
+
+  return lines.join('\n');
+}
+
+function appendCells(tr, values) {
+  for (const v of values) {
+    const td = document.createElement('td');
+    td.textContent = v;
+    tr.append(td);
+  }
+}
+
+function formatCurrency(value) {
+  const n = Number(value || 0);
+  const sign = n < 0 ? '-' : '';
+  return `${sign}$${Math.abs(n).toFixed(2)}`;
+}
+
 async function runNetBillingReport() {
   await runWithFeedback({
     buttons: [els.runNetBillingReport],
@@ -586,6 +932,10 @@ function initReportDates() {
   start.setDate(today.getDate() - 6);
   els.reportStartDate.value = dateInputValue(start);
   els.reportEndDate.value = dateInputValue(today);
+  // TOU report defaults to month-to-date.
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  els.touStartDate.value = dateInputValue(monthStart);
+  els.touEndDate.value = dateInputValue(today);
 }
 
 function dateInputValue(date) {

@@ -47,6 +47,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/discover' && req.method === 'POST') return await discoverSites(res);
     if (url.pathname === '/api/live-status' && req.method === 'GET') return await liveStatus(res);
     if (url.pathname === '/api/reports/net-billing' && req.method === 'GET') return await netBillingReport(url, res);
+    if (url.pathname === '/api/reports/tou-cost' && req.method === 'GET') return await touCostReport(url, res);
     if (url.pathname.startsWith('/api/run/') && req.method === 'POST') return await runManual(url, res);
     if (url.pathname === '/auth/login' && req.method === 'GET') return await startTeslaLogin(res);
     if (url.pathname === '/auth/callback' && req.method === 'GET') return await finishTeslaLogin(url, res);
@@ -561,6 +562,372 @@ async function netBillingReport(url, res) {
     totals: roundReport(totals),
     responses
   });
+}
+
+async function touCostReport(url, res) {
+  const config = await readConfig();
+  requireTeslaSetting(config.tesla.energySiteId, 'Energy site ID');
+  const timeZone = url.searchParams.get('timeZone') || config.timezone || 'America/Los_Angeles';
+  const startDate = url.searchParams.get('startDate');
+  const endDate = url.searchParams.get('endDate');
+  if (!isDateOnly(startDate) || !isDateOnly(endDate)) {
+    return sendJson(res, { error: 'startDate and endDate must be YYYY-MM-DD.' }, 400);
+  }
+  if (startDate > endDate) {
+    return sendJson(res, { error: 'startDate must be on or before endDate.' }, 400);
+  }
+  const dates = dateRange(startDate, endDate);
+  if (dates.length > 31) {
+    return sendJson(res, { error: 'Report range is limited to 31 days to control Tesla API usage.' }, 400);
+  }
+
+  const siteInfo = await teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/site_info`);
+  const tariff = extractTariff(siteInfo?.response?.tariff_content);
+  if (!tariff) {
+    return sendJson(res, { error: 'No tariff_content found in site_info; cannot compute costs.' }, 502);
+  }
+
+  const days = [];
+  for (const date of dates) {
+    const energyParams = new URLSearchParams({
+      kind: 'energy', period: 'day',
+      start_date: zonedDateTimeParam(date, '00:00:00', timeZone),
+      end_date:   zonedDateTimeParam(date, '23:59:59', timeZone),
+      time_zone:  timeZone
+    });
+    const soeParams = new URLSearchParams({
+      kind: 'soe', period: 'day',
+      start_date: zonedDateTimeParam(date, '00:00:00', timeZone),
+      end_date:   zonedDateTimeParam(date, '23:59:59', timeZone),
+      time_zone:  timeZone
+    });
+    const [energyRaw, soeRaw] = await Promise.all([
+      teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/calendar_history?${energyParams}`),
+      teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/calendar_history?${soeParams}`)
+    ]);
+    const intervals = Array.isArray(energyRaw.response?.time_series) ? energyRaw.response.time_series : [];
+    const soeSeries = Array.isArray(soeRaw.response?.time_series) ? soeRaw.response.time_series : [];
+    days.push(buildTouDay({ date, intervals, soeSeries, tariff }));
+  }
+
+  const totals = sumTouDays(days);
+  await logEvent('info', 'tou_cost_report', {
+    startDate, endDate, timeZone,
+    daysCount: days.length,
+    netCost: totals.netCost,
+    peakImportKwh: totals.peakImportKwh
+  });
+
+  return sendJson(res, {
+    startDate, endDate, timeZone,
+    siteId: config.tesla.energySiteId,
+    tariff,
+    days,
+    totals
+  });
+}
+
+function extractTariff(tariffContent) {
+  if (!tariffContent || typeof tariffContent !== 'object') return null;
+  const buy = tariffContent.energy_charges || {};
+  const sell = tariffContent.sell_tariff?.energy_charges || {};
+  const seasonsRaw = tariffContent.seasons || {};
+  const seasonList = [];
+  for (const [label, raw] of Object.entries(seasonsRaw)) {
+    if (!raw || typeof raw !== 'object') continue;
+    seasonList.push({
+      label,
+      fromMonth: Number(raw.fromMonth),
+      toMonth: Number(raw.toMonth),
+      touPeriods: raw.tou_periods || {}
+    });
+  }
+  if (!seasonList.length) return null;
+  return {
+    code: tariffContent.code || '',
+    name: tariffContent.name || '',
+    utility: tariffContent.utility || '',
+    seasons: seasonList,
+    buy,
+    sell
+  };
+}
+
+function seasonForDate(dateStr, tariff) {
+  const month = Number(dateStr.slice(5, 7));
+  // Months can wrap (fromMonth=10, toMonth=5 means Oct-May inclusive).
+  for (const season of tariff.seasons) {
+    if (monthInRange(month, season.fromMonth, season.toMonth)) return season;
+  }
+  return tariff.seasons[0];
+}
+
+function monthInRange(month, fromMonth, toMonth) {
+  if (fromMonth <= toMonth) return month >= fromMonth && month <= toMonth;
+  return month >= fromMonth || month <= toMonth;
+}
+
+function periodForLocalTime(hour, minute, weekday, season) {
+  const periods = season.touPeriods || {};
+  for (const [name, ranges] of Object.entries(periods)) {
+    if (!Array.isArray(ranges)) continue;
+    for (const range of ranges) {
+      if (rangeMatches(hour, minute, weekday, range)) return name;
+    }
+  }
+  return 'OFF_PEAK';
+}
+
+function rangeMatches(hour, minute, weekday, range) {
+  const fromDow = Number(range.fromDayOfWeek);
+  const toDow = Number(range.toDayOfWeek);
+  if (!Number.isNaN(fromDow) && !Number.isNaN(toDow)) {
+    if (!weekdayInRange(weekday, fromDow, toDow)) return false;
+  }
+  const fromMinutes = Number(range.fromHour) * 60 + Number(range.fromMinute || 0);
+  const toMinutes = Number(range.toHour) * 60 + Number(range.toMinute || 0);
+  const cur = hour * 60 + minute;
+  if (fromMinutes === toMinutes) return true;
+  if (fromMinutes < toMinutes) return cur >= fromMinutes && cur < toMinutes;
+  return cur >= fromMinutes || cur < toMinutes;
+}
+
+function weekdayInRange(weekday, from, to) {
+  if (from <= to) return weekday >= from && weekday <= to;
+  return weekday >= from || weekday <= to;
+}
+
+function peakWindowMinutes(season) {
+  const on = season.touPeriods?.ON_PEAK?.[0];
+  if (!on) return { startMin: 16 * 60, endMin: 21 * 60 };
+  const startMin = Number(on.fromHour) * 60 + Number(on.fromMinute || 0);
+  const endMin = Number(on.toHour) * 60 + Number(on.toMinute || 0);
+  return { startMin, endMin };
+}
+
+function buildTouDay({ date, intervals, soeSeries, tariff }) {
+  const season = seasonForDate(date, tariff);
+  const buyRates = tariff.buy?.[season.label] || {};
+  const sellRates = tariff.sell?.[season.label] || {};
+  const { startMin: peakStartMin, endMin: peakEndMin } = peakWindowMinutes(season);
+
+  const perPeriod = new Map(); // period -> { importedKwh, exportedKwh }
+  const ensurePeriod = name => {
+    if (!perPeriod.has(name)) perPeriod.set(name, { importedKwh: 0, exportedKwh: 0 });
+    return perPeriod.get(name);
+  };
+
+  const peak = {
+    homeUsageKwh: 0,
+    batteryToLoadKwh: 0,
+    solarToLoadKwh: 0,
+    gridToLoadKwh: 0,
+    batteryToGridKwh: 0,
+    solarToGridKwh: 0,
+    batteryFromGridKwh: 0
+  };
+
+  // PG&E billing is local-clock; weekday from interval timestamp's local zone.
+  for (const interval of intervals) {
+    const ts = String(interval.timestamp || '');
+    if (ts.length < 16) continue;
+    const hour = Number(ts.slice(11, 13));
+    const minute = Number(ts.slice(14, 16));
+    const weekday = localWeekday(ts);
+    const period = periodForLocalTime(hour, minute, weekday, season);
+
+    const importedKwh = whToKwh(
+      Number(interval.battery_energy_imported_from_grid || 0) +
+      Number(interval.consumer_energy_imported_from_grid || 0)
+    );
+    const exportedKwh = whToKwh(
+      Number(interval.grid_energy_exported_from_battery || 0) +
+      Number(interval.grid_energy_exported_from_solar || 0)
+    );
+    const bucket = ensurePeriod(period);
+    bucket.importedKwh += importedKwh;
+    bucket.exportedKwh += exportedKwh;
+
+    const cur = hour * 60 + minute;
+    const inPeak = peakStartMin < peakEndMin
+      ? (cur >= peakStartMin && cur < peakEndMin)
+      : (cur >= peakStartMin || cur < peakEndMin);
+    if (inPeak) {
+      peak.homeUsageKwh += whToKwh(Number(interval.total_home_usage || 0));
+      peak.batteryToLoadKwh += whToKwh(Number(interval.consumer_energy_imported_from_battery || 0));
+      peak.solarToLoadKwh += whToKwh(Number(interval.consumer_energy_imported_from_solar || 0));
+      peak.gridToLoadKwh += whToKwh(Number(interval.consumer_energy_imported_from_grid || 0));
+      peak.batteryToGridKwh += whToKwh(Number(interval.grid_energy_exported_from_battery || 0));
+      peak.solarToGridKwh += whToKwh(Number(interval.grid_energy_exported_from_solar || 0));
+      peak.batteryFromGridKwh += whToKwh(Number(interval.battery_energy_imported_from_grid || 0));
+    }
+  }
+
+  const periods = [...perPeriod.entries()].map(([name, totals]) => {
+    const buyRate = Number(buyRates[name] || 0);
+    const sellRate = Number(sellRates[name] || 0);
+    const importCost = totals.importedKwh * buyRate;
+    const exportCredit = totals.exportedKwh * sellRate;
+    return {
+      period: name,
+      importedKwh: round(totals.importedKwh),
+      exportedKwh: round(totals.exportedKwh),
+      buyRate, sellRate,
+      importCost: roundCurrency(importCost),
+      exportCredit: roundCurrency(exportCredit),
+      netCost: roundCurrency(importCost - exportCredit)
+    };
+  });
+  // Stable order: OFF_PEAK first, then ON_PEAK, then any extras.
+  periods.sort((a, b) => periodOrder(a.period) - periodOrder(b.period));
+
+  const soe = pickSoeSamples(soeSeries, peakStartMin, peakEndMin);
+
+  const netCost = periods.reduce((sum, p) => sum + p.netCost, 0);
+  const importCost = periods.reduce((sum, p) => sum + p.importCost, 0);
+  const exportCredit = periods.reduce((sum, p) => sum + p.exportCredit, 0);
+  const peakPeriod = periods.find(p => p.period === 'ON_PEAK') || { importedKwh: 0, importCost: 0, exportedKwh: 0, exportCredit: 0 };
+
+  return {
+    date,
+    seasonLabel: season.label,
+    seasonMonths: { from: season.fromMonth, to: season.toMonth },
+    periods,
+    importCost: roundCurrency(importCost),
+    exportCredit: roundCurrency(exportCredit),
+    netCost: roundCurrency(netCost),
+    peakImportKwh: peakPeriod.importedKwh,
+    peakImportCost: peakPeriod.importCost,
+    peakExportKwh: peakPeriod.exportedKwh,
+    peakExportCredit: peakPeriod.exportCredit,
+    peakAudit: {
+      homeUsageKwh: round(peak.homeUsageKwh),
+      batteryToLoadKwh: round(peak.batteryToLoadKwh),
+      solarToLoadKwh: round(peak.solarToLoadKwh),
+      gridToLoadKwh: round(peak.gridToLoadKwh),
+      batteryToGridKwh: round(peak.batteryToGridKwh),
+      solarToGridKwh: round(peak.solarToGridKwh),
+      batteryFromGridKwh: round(peak.batteryFromGridKwh),
+      percentLoadFromBattery: peak.homeUsageKwh > 0
+        ? Math.round((peak.batteryToLoadKwh / peak.homeUsageKwh) * 1000) / 10
+        : null,
+      ...soe
+    }
+  };
+}
+
+function periodOrder(name) {
+  if (name === 'OFF_PEAK') return 0;
+  if (name === 'PARTIAL_PEAK') return 1;
+  if (name === 'ON_PEAK') return 2;
+  return 3;
+}
+
+function pickSoeSamples(soeSeries, peakStartMin, peakEndMin) {
+  if (!Array.isArray(soeSeries) || !soeSeries.length) {
+    return { soeAtPeakStart: null, soeAtPeakEnd: null, soeMinDuringPeak: null };
+  }
+  let startSample = null;
+  let endSample = null;
+  let minDuringPeak = null;
+  let bestStartGap = Infinity;
+  let bestEndGap = Infinity;
+  for (const sample of soeSeries) {
+    const ts = String(sample.timestamp || '');
+    if (ts.length < 16) continue;
+    const hour = Number(ts.slice(11, 13));
+    const minute = Number(ts.slice(14, 16));
+    const cur = hour * 60 + minute;
+    const soe = Number(sample.soe);
+    if (Number.isFinite(soe)) {
+      const startGap = Math.abs(cur - peakStartMin);
+      if (startGap < bestStartGap) { bestStartGap = startGap; startSample = soe; }
+      const endGap = Math.abs(cur - peakEndMin);
+      if (endGap < bestEndGap) { bestEndGap = endGap; endSample = soe; }
+      const inPeak = peakStartMin < peakEndMin
+        ? (cur >= peakStartMin && cur < peakEndMin)
+        : (cur >= peakStartMin || cur < peakEndMin);
+      if (inPeak && (minDuringPeak === null || soe < minDuringPeak)) minDuringPeak = soe;
+    }
+  }
+  return {
+    soeAtPeakStart: startSample === null ? null : round(startSample),
+    soeAtPeakEnd: endSample === null ? null : round(endSample),
+    soeMinDuringPeak: minDuringPeak === null ? null : round(minDuringPeak)
+  };
+}
+
+function localWeekday(timestamp) {
+  // Tesla timestamps include local offset (e.g. "2026-05-25T16:00:00-07:00").
+  // Date() respects the offset, returning the correct UTC instant; getDay() then
+  // returns the weekday in the *runtime's* local zone, which is good enough for
+  // TOU-C since periods are identical across all weekdays anyway.
+  const d = new Date(timestamp);
+  return Number.isNaN(d.getTime()) ? 0 : d.getDay();
+}
+
+function sumTouDays(days) {
+  const totals = {
+    importCost: 0,
+    exportCredit: 0,
+    netCost: 0,
+    peakImportKwh: 0,
+    peakImportCost: 0,
+    peakExportKwh: 0,
+    peakExportCredit: 0,
+    peakAudit: {
+      homeUsageKwh: 0,
+      batteryToLoadKwh: 0,
+      solarToLoadKwh: 0,
+      gridToLoadKwh: 0,
+      batteryToGridKwh: 0,
+      solarToGridKwh: 0,
+      batteryFromGridKwh: 0
+    },
+    periodTotals: {} // name -> { importedKwh, exportedKwh, importCost, exportCredit }
+  };
+  for (const day of days) {
+    totals.importCost += day.importCost;
+    totals.exportCredit += day.exportCredit;
+    totals.netCost += day.netCost;
+    totals.peakImportKwh += day.peakImportKwh;
+    totals.peakImportCost += day.peakImportCost;
+    totals.peakExportKwh += day.peakExportKwh;
+    totals.peakExportCredit += day.peakExportCredit;
+    for (const k of Object.keys(totals.peakAudit)) {
+      totals.peakAudit[k] += day.peakAudit[k] || 0;
+    }
+    for (const p of day.periods) {
+      if (!totals.periodTotals[p.period]) {
+        totals.periodTotals[p.period] = { importedKwh: 0, exportedKwh: 0, importCost: 0, exportCredit: 0 };
+      }
+      const t = totals.periodTotals[p.period];
+      t.importedKwh += p.importedKwh;
+      t.exportedKwh += p.exportedKwh;
+      t.importCost += p.importCost;
+      t.exportCredit += p.exportCredit;
+    }
+  }
+  for (const k of Object.keys(totals)) {
+    if (typeof totals[k] === 'number') totals[k] = k.endsWith('Kwh') ? round(totals[k]) : roundCurrency(totals[k]);
+  }
+  for (const k of Object.keys(totals.peakAudit)) {
+    totals.peakAudit[k] = round(totals.peakAudit[k]);
+  }
+  for (const p of Object.values(totals.periodTotals)) {
+    p.importedKwh = round(p.importedKwh);
+    p.exportedKwh = round(p.exportedKwh);
+    p.importCost = roundCurrency(p.importCost);
+    p.exportCredit = roundCurrency(p.exportCredit);
+  }
+  totals.peakAudit.percentLoadFromBattery = totals.peakAudit.homeUsageKwh > 0
+    ? Math.round((totals.peakAudit.batteryToLoadKwh / totals.peakAudit.homeUsageKwh) * 1000) / 10
+    : null;
+  return totals;
+}
+
+function roundCurrency(value) {
+  return Math.round(value * 100) / 100;
 }
 
 function aggregateEnergyIntervals(date, intervals) {

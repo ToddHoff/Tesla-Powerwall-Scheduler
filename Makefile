@@ -16,6 +16,9 @@ tag:
 	git tag rel523b1
 	git push origin --tags
 
+taillog:
+	tail -50 -f ~/tesla/logs/launchd-run-due.out.log
+
 
 copyhere:
 	cp ~/Library/LaunchAgents/com.toddhoff.tesla-run-due.plist .

@@ -17,8 +17,14 @@ tag:
 	git push origin --tags
 
 
-copy:
+copyhere:
 	cp ~/Library/LaunchAgents/com.toddhoff.tesla-run-due.plist .
+
+launch:
+	cp ./com.toddhoff.tesla-run-due.plist ~/Library/LaunchAgents/com.toddhoff.tesla-run-due.plist
+	launchctl unload ~/Library/LaunchAgents/com.toddhoff.tesla-run-due.plist 2>/dev/null || true
+	launchctl load ~/Library/LaunchAgents/com.toddhoff.tesla-run-due.plist
+	launchctl start com.toddhoff.tesla-run-due
 
 cleardefaults:
 	xcrun simctl --set previews delete all

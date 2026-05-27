@@ -48,6 +48,8 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/live-status' && req.method === 'GET') return await liveStatus(res);
     if (url.pathname === '/api/reports/net-billing' && req.method === 'GET') return await netBillingReport(url, res);
     if (url.pathname === '/api/reports/tou-cost' && req.method === 'GET') return await touCostReport(url, res);
+    if (url.pathname === '/api/rates' && req.method === 'GET') return await ratesGet(res);
+    if (url.pathname === '/api/rates' && req.method === 'POST') return await ratesPost(req, res);
     if (url.pathname.startsWith('/api/run/') && req.method === 'POST') return await runManual(url, res);
     if (url.pathname === '/auth/login' && req.method === 'GET') return await startTeslaLogin(res);
     if (url.pathname === '/auth/callback' && req.method === 'GET') return await finishTeslaLogin(url, res);
@@ -582,9 +584,10 @@ async function touCostReport(url, res) {
   }
 
   const siteInfo = await teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/site_info`);
-  const tariff = extractTariff(siteInfo?.response?.tariff_content);
+  const localSettings = await readJson(SETTINGS_PATH, {});
+  const tariff = buildRatePlan(localSettings, siteInfo);
   if (!tariff) {
-    return sendJson(res, { error: 'No tariff_content found in site_info; cannot compute costs.' }, 502);
+    return sendJson(res, { error: 'No rate plan available (Tesla tariff_content empty and no custom override set).' }, 502);
   }
 
   const days = [];
@@ -627,39 +630,133 @@ async function touCostReport(url, res) {
   });
 }
 
-function extractTariff(tariffContent) {
+// --- Rate plan abstraction -------------------------------------------------
+// Custom plans (from local-settings.json rateStructure) and Tesla plans (from
+// site_info.tariff_content) both normalize to the same shape:
+//   { source, code, name, utility, currency, seasons: [
+//     { label, startMonth, startDay,
+//       // Tesla only: fromMonth/toMonth from tariff data
+//       // Custom only: nextStartMonth/nextStartDay derived from neighbor season
+//       periods: [
+//         { name, windows: [{startMin, endMin, fromDow, toDow}], buyRate, sellRate }
+//       ]
+//     }
+//   ]}
+
+function buildRatePlan(localSettings, siteInfo) {
+  const custom = localSettings?.rateStructure;
+  if (custom?.enabled) {
+    const plan = normalizeCustomPlan(custom);
+    if (plan) return plan;
+  }
+  return normalizeTeslaPlan(siteInfo?.response?.tariff_content);
+}
+
+function normalizeCustomPlan(rateStructure) {
+  const seasons = Array.isArray(rateStructure?.seasons) ? rateStructure.seasons : [];
+  if (!seasons.length) return null;
+  const sorted = [...seasons].sort((a, b) =>
+    ((a.startMonth || 1) * 100 + (a.startDay || 1)) -
+    ((b.startMonth || 1) * 100 + (b.startDay || 1))
+  );
+  const normalized = sorted.map((s, i) => {
+    const next = sorted[(i + 1) % sorted.length];
+    return {
+      label: s.name || `Season ${i + 1}`,
+      startMonth: Number(s.startMonth) || 1,
+      startDay: Number(s.startDay) || 1,
+      nextStartMonth: Number(next.startMonth) || 1,
+      nextStartDay: Number(next.startDay) || 1,
+      periods: (s.periods || []).map(p => ({
+        name: p.name || 'Off-Peak',
+        windows: [{
+          startMin: parseTimeMinutes(p.startTime) ?? 0,
+          endMin: parseTimeMinutes(p.endTime) ?? 1440,
+          fromDow: 0, toDow: 6
+        }],
+        buyRate: Number(p.buyRate || 0),
+        sellRate: Number(p.sellRate || 0)
+      }))
+    };
+  });
+  return {
+    source: 'custom',
+    code: 'custom',
+    name: 'User-defined rate structure',
+    utility: '',
+    currency: rateStructure.currency || 'USD',
+    seasons: normalized
+  };
+}
+
+function normalizeTeslaPlan(tariffContent) {
   if (!tariffContent || typeof tariffContent !== 'object') return null;
+  const seasonsRaw = tariffContent.seasons || {};
   const buy = tariffContent.energy_charges || {};
   const sell = tariffContent.sell_tariff?.energy_charges || {};
-  const seasonsRaw = tariffContent.seasons || {};
   const seasonList = [];
   for (const [label, raw] of Object.entries(seasonsRaw)) {
     if (!raw || typeof raw !== 'object') continue;
+    const periods = [];
+    for (const [periodName, ranges] of Object.entries(raw.tou_periods || {})) {
+      if (!Array.isArray(ranges)) continue;
+      const windows = ranges.map(r => ({
+        startMin: Number(r.fromHour) * 60 + Number(r.fromMinute || 0),
+        endMin: Number(r.toHour) * 60 + Number(r.toMinute || 0),
+        fromDow: Number(r.fromDayOfWeek ?? 0),
+        toDow: Number(r.toDayOfWeek ?? 6)
+      }));
+      periods.push({
+        name: periodName,
+        windows,
+        buyRate: Number(buy?.[label]?.[periodName] || 0),
+        sellRate: Number(sell?.[label]?.[periodName] || 0)
+      });
+    }
     seasonList.push({
       label,
       fromMonth: Number(raw.fromMonth),
       toMonth: Number(raw.toMonth),
-      touPeriods: raw.tou_periods || {}
+      startMonth: Number(raw.fromMonth),
+      startDay: Number(raw.fromDay) || 1,
+      periods
     });
   }
   if (!seasonList.length) return null;
   return {
+    source: 'tesla',
     code: tariffContent.code || '',
     name: tariffContent.name || '',
     utility: tariffContent.utility || '',
-    seasons: seasonList,
-    buy,
-    sell
+    currency: 'USD',
+    seasons: seasonList
   };
 }
 
-function seasonForDate(dateStr, tariff) {
+function seasonForDate(dateStr, plan) {
+  if (!plan?.seasons?.length) return null;
   const month = Number(dateStr.slice(5, 7));
-  // Months can wrap (fromMonth=10, toMonth=5 means Oct-May inclusive).
-  for (const season of tariff.seasons) {
+  const day = Number(dateStr.slice(8, 10));
+  const cur = month * 100 + day;
+
+  if (plan.source === 'custom') {
+    for (const season of plan.seasons) {
+      const start = season.startMonth * 100 + season.startDay;
+      const end = season.nextStartMonth * 100 + season.nextStartDay;
+      if (dateInSeasonRange(cur, start, end)) return season;
+    }
+    return plan.seasons[0];
+  }
+  for (const season of plan.seasons) {
     if (monthInRange(month, season.fromMonth, season.toMonth)) return season;
   }
-  return tariff.seasons[0];
+  return plan.seasons[0];
+}
+
+function dateInSeasonRange(cur, start, end) {
+  if (start === end) return true;
+  if (start < end) return cur >= start && cur < end;
+  return cur >= start || cur < end;
 }
 
 function monthInRange(month, fromMonth, toMonth) {
@@ -668,48 +765,74 @@ function monthInRange(month, fromMonth, toMonth) {
 }
 
 function periodForLocalTime(hour, minute, weekday, season) {
-  const periods = season.touPeriods || {};
-  for (const [name, ranges] of Object.entries(periods)) {
-    if (!Array.isArray(ranges)) continue;
-    for (const range of ranges) {
-      if (rangeMatches(hour, minute, weekday, range)) return name;
+  const cur = hour * 60 + minute;
+  for (const period of season.periods || []) {
+    for (const window of period.windows || []) {
+      if (!weekdayInRange(weekday, window.fromDow, window.toDow)) continue;
+      if (timeInWindow(cur, window.startMin, window.endMin)) return period.name;
     }
   }
-  return 'OFF_PEAK';
+  return season.periods?.[0]?.name || 'Off-Peak';
 }
 
-function rangeMatches(hour, minute, weekday, range) {
-  const fromDow = Number(range.fromDayOfWeek);
-  const toDow = Number(range.toDayOfWeek);
-  if (!Number.isNaN(fromDow) && !Number.isNaN(toDow)) {
-    if (!weekdayInRange(weekday, fromDow, toDow)) return false;
-  }
-  const fromMinutes = Number(range.fromHour) * 60 + Number(range.fromMinute || 0);
-  const toMinutes = Number(range.toHour) * 60 + Number(range.toMinute || 0);
-  const cur = hour * 60 + minute;
-  if (fromMinutes === toMinutes) return true;
-  if (fromMinutes < toMinutes) return cur >= fromMinutes && cur < toMinutes;
-  return cur >= fromMinutes || cur < toMinutes;
+function timeInWindow(cur, startMin, endMin) {
+  if (startMin === endMin) return true;
+  if (startMin < endMin) return cur >= startMin && cur < endMin;
+  return cur >= startMin || cur < endMin;
 }
 
 function weekdayInRange(weekday, from, to) {
+  if (from == null || to == null || Number.isNaN(from) || Number.isNaN(to)) return true;
   if (from <= to) return weekday >= from && weekday <= to;
   return weekday >= from || weekday <= to;
 }
 
-function peakWindowMinutes(season) {
-  const on = season.touPeriods?.ON_PEAK?.[0];
-  if (!on) return { startMin: 16 * 60, endMin: 21 * 60 };
-  const startMin = Number(on.fromHour) * 60 + Number(on.fromMinute || 0);
-  const endMin = Number(on.toHour) * 60 + Number(on.toMinute || 0);
-  return { startMin, endMin };
+function findPeakWindow(season) {
+  for (const period of season?.periods || []) {
+    if (isPeakName(period.name) && period.windows?.length) {
+      const w = period.windows[0];
+      return { startMin: w.startMin, endMin: w.endMin };
+    }
+  }
+  // Reasonable default: 16:00–21:00 (PG&E TOU-C peak window).
+  return { startMin: 16 * 60, endMin: 21 * 60 };
+}
+
+function isPeakName(name) {
+  const n = String(name || '').toLowerCase().replace(/[_\s-]/g, '');
+  if (n.includes('partial') || n.includes('mid')) return false;
+  if (n.includes('off')) return false;
+  return n.includes('peak');
+}
+
+function isPartialPeakName(name) {
+  const n = String(name || '').toLowerCase().replace(/[_\s-]/g, '');
+  return n.includes('partial') || n.includes('mid');
+}
+
+function isOffPeakName(name) {
+  const n = String(name || '').toLowerCase().replace(/[_\s-]/g, '');
+  return n.includes('off');
+}
+
+function parseTimeMinutes(text) {
+  if (text == null) return null;
+  const m = String(text).match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h < 0 || h > 24 || min < 0 || min > 59) return null;
+  if (h === 24 && min !== 0) return null;
+  return h * 60 + min;
 }
 
 function buildTouDay({ date, intervals, soeSeries, tariff }) {
   const season = seasonForDate(date, tariff);
-  const buyRates = tariff.buy?.[season.label] || {};
-  const sellRates = tariff.sell?.[season.label] || {};
-  const { startMin: peakStartMin, endMin: peakEndMin } = peakWindowMinutes(season);
+  const rateByName = {};
+  for (const period of season.periods || []) {
+    rateByName[period.name] = { buyRate: period.buyRate, sellRate: period.sellRate };
+  }
+  const { startMin: peakStartMin, endMin: peakEndMin } = findPeakWindow(season);
 
   const perPeriod = new Map(); // period -> { importedKwh, exportedKwh }
   const ensurePeriod = name => {
@@ -764,21 +887,21 @@ function buildTouDay({ date, intervals, soeSeries, tariff }) {
   }
 
   const periods = [...perPeriod.entries()].map(([name, totals]) => {
-    const buyRate = Number(buyRates[name] || 0);
-    const sellRate = Number(sellRates[name] || 0);
-    const importCost = totals.importedKwh * buyRate;
-    const exportCredit = totals.exportedKwh * sellRate;
+    const rates = rateByName[name] || { buyRate: 0, sellRate: 0 };
+    const importCost = totals.importedKwh * rates.buyRate;
+    const exportCredit = totals.exportedKwh * rates.sellRate;
     return {
       period: name,
       importedKwh: round(totals.importedKwh),
       exportedKwh: round(totals.exportedKwh),
-      buyRate, sellRate,
+      buyRate: rates.buyRate,
+      sellRate: rates.sellRate,
       importCost: roundCurrency(importCost),
       exportCredit: roundCurrency(exportCredit),
       netCost: roundCurrency(importCost - exportCredit)
     };
   });
-  // Stable order: OFF_PEAK first, then ON_PEAK, then any extras.
+  // Stable order: Off-Peak first, then Partial-Peak, then Peak, then any extras.
   periods.sort((a, b) => periodOrder(a.period) - periodOrder(b.period));
 
   const soe = pickSoeSamples(soeSeries, peakStartMin, peakEndMin);
@@ -786,12 +909,15 @@ function buildTouDay({ date, intervals, soeSeries, tariff }) {
   const netCost = periods.reduce((sum, p) => sum + p.netCost, 0);
   const importCost = periods.reduce((sum, p) => sum + p.importCost, 0);
   const exportCredit = periods.reduce((sum, p) => sum + p.exportCredit, 0);
-  const peakPeriod = periods.find(p => p.period === 'ON_PEAK') || { importedKwh: 0, importCost: 0, exportedKwh: 0, exportCredit: 0 };
+  const peakPeriod = periods.find(p => isPeakName(p.period))
+    || { importedKwh: 0, importCost: 0, exportedKwh: 0, exportCredit: 0 };
 
   return {
     date,
     seasonLabel: season.label,
-    seasonMonths: { from: season.fromMonth, to: season.toMonth },
+    seasonMonths: season.fromMonth != null
+      ? { from: season.fromMonth, to: season.toMonth }
+      : { startMonth: season.startMonth, startDay: season.startDay },
     periods,
     importCost: roundCurrency(importCost),
     exportCredit: roundCurrency(exportCredit),
@@ -817,10 +943,95 @@ function buildTouDay({ date, intervals, soeSeries, tariff }) {
 }
 
 function periodOrder(name) {
-  if (name === 'OFF_PEAK') return 0;
-  if (name === 'PARTIAL_PEAK') return 1;
-  if (name === 'ON_PEAK') return 2;
+  if (isOffPeakName(name)) return 0;
+  if (isPartialPeakName(name)) return 1;
+  if (isPeakName(name)) return 2;
   return 3;
+}
+
+async function ratesGet(res) {
+  const localSettings = await readJson(SETTINGS_PATH, {});
+  let siteInfo = null;
+  try {
+    const config = await readConfig();
+    if (config.tesla.energySiteId) {
+      siteInfo = await teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/site_info`);
+    }
+  } catch (error) {
+    await logEvent('warn', 'rates_tesla_fetch_failed', { message: error.message });
+  }
+  const tesla = normalizeTeslaPlan(siteInfo?.response?.tariff_content);
+  const effective = buildRatePlan(localSettings, siteInfo);
+  return sendJson(res, {
+    custom: localSettings?.rateStructure || null,
+    tesla,
+    effective
+  });
+}
+
+async function ratesPost(req, res) {
+  const body = await readRequestJson(req);
+  const errors = validateRateStructure(body);
+  if (errors.length) {
+    return sendJson(res, { ok: false, errors }, 400);
+  }
+  const localSettings = await readJson(SETTINGS_PATH, {});
+  localSettings.rateStructure = body;
+  await writeJson(SETTINGS_PATH, localSettings);
+  await logEvent('info', 'rate_structure_saved', {
+    enabled: Boolean(body.enabled),
+    seasonCount: (body.seasons || []).length
+  });
+  return sendJson(res, { ok: true, rateStructure: body });
+}
+
+function validateRateStructure(rs) {
+  const errors = [];
+  if (!rs || typeof rs !== 'object') return ['Missing rateStructure body.'];
+  if (!Array.isArray(rs.seasons) || rs.seasons.length === 0) {
+    errors.push('At least one season is required.');
+    return errors;
+  }
+  for (const [si, season] of rs.seasons.entries()) {
+    const where = `season[${si}] (${season?.name || 'unnamed'})`;
+    if (!season?.name) errors.push(`${where}: name is required.`);
+    if (!Number.isInteger(season?.startMonth) || season.startMonth < 1 || season.startMonth > 12) {
+      errors.push(`${where}: startMonth must be 1–12.`);
+    }
+    if (!Number.isInteger(season?.startDay) || season.startDay < 1 || season.startDay > 31) {
+      errors.push(`${where}: startDay must be 1–31.`);
+    }
+    const periods = Array.isArray(season?.periods) ? season.periods : [];
+    if (!periods.length) {
+      errors.push(`${where}: at least one period is required.`);
+      continue;
+    }
+    const coverage = new Array(1440).fill(0);
+    for (const [pi, p] of periods.entries()) {
+      const pwhere = `${where}.period[${pi}] (${p?.name || 'unnamed'})`;
+      if (!p?.name) errors.push(`${pwhere}: name is required.`);
+      const start = parseTimeMinutes(p?.startTime);
+      const end = parseTimeMinutes(p?.endTime);
+      if (start == null) errors.push(`${pwhere}: invalid startTime (expected HH:MM).`);
+      if (end == null) errors.push(`${pwhere}: invalid endTime (expected HH:MM, may be 24:00).`);
+      if (!(Number(p?.buyRate) >= 0)) errors.push(`${pwhere}: buyRate must be ≥ 0.`);
+      if (!(Number(p?.sellRate) >= 0)) errors.push(`${pwhere}: sellRate must be ≥ 0.`);
+      if (start != null && end != null) {
+        const endNorm = end === 0 ? 1440 : end;
+        if (start < endNorm) {
+          for (let i = start; i < endNorm; i++) coverage[i]++;
+        } else {
+          for (let i = start; i < 1440; i++) coverage[i]++;
+          for (let i = 0; i < endNorm; i++) coverage[i]++;
+        }
+      }
+    }
+    const overlap = coverage.some(v => v > 1);
+    const gap = coverage.some(v => v === 0);
+    if (overlap) errors.push(`${where}: periods overlap; each minute of the day must be covered exactly once.`);
+    if (gap) errors.push(`${where}: periods leave a gap; each minute of the day must be covered exactly once.`);
+  }
+  return errors;
 }
 
 function pickSoeSamples(soeSeries, peakStartMin, peakEndMin) {

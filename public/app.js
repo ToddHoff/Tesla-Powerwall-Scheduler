@@ -6,6 +6,9 @@ let lastLogs = [];
 let logSourceFilter = 'all';
 let settingsFetched = false;
 let lastSettings = null;
+let ratesFetched = false;
+let ratesDraft = null;       // current editable draft
+let ratesTeslaFallback = null;
 
 const els = {
   viewButtons: [...document.querySelectorAll('.app-tabs button')],
@@ -13,7 +16,14 @@ const els = {
   netBillingView: document.querySelector('#netBillingView'),
   touCostView: document.querySelector('#touCostView'),
   settingsView: document.querySelector('#settingsView'),
+  ratesView: document.querySelector('#ratesView'),
   activityView: document.querySelector('#activityView'),
+  ratesEnabled: document.querySelector('#ratesEnabled'),
+  ratesSave: document.querySelector('#ratesSave'),
+  ratesStatus: document.querySelector('#ratesStatus'),
+  ratesValidation: document.querySelector('#ratesValidation'),
+  ratesSeasons: document.querySelector('#ratesSeasons'),
+  ratesSourceTag: document.querySelector('#ratesSourceTag'),
   settingsRefresh: document.querySelector('#settingsRefresh'),
   settingsFetchedAt: document.querySelector('#settingsFetchedAt'),
   settingsError: document.querySelector('#settingsError'),
@@ -21,6 +31,7 @@ const els = {
   settingsLive: document.querySelector('#settingsLive'),
   settingsRawSiteInfo: document.querySelector('#settingsRawSiteInfo'),
   settingsRawLive: document.querySelector('#settingsRawLive'),
+  settingsRatePlan: document.querySelector('#settingsRatePlan'),
   connectionPill: document.querySelector('#connectionPill'),
   seasonText: document.querySelector('#seasonText'),
   nextRunText: document.querySelector('#nextRunText'),
@@ -60,6 +71,7 @@ const els = {
   touStatus: document.querySelector('#touStatus'),
   touSummary: document.querySelector('#touSummary'),
   touTariffNote: document.querySelector('#touTariffNote'),
+  touRatePlan: document.querySelector('#touRatePlan'),
   touCostRows: document.querySelector('#touCostRows'),
   touCostTotals: document.querySelector('#touCostTotals'),
   touAuditRows: document.querySelector('#touAuditRows'),
@@ -182,8 +194,11 @@ async function refreshSettings() {
     pendingMessage: '',
     successMessage: '',
     task: async () => {
-      const result = await api('/api/live-status');
-      lastSettings = { ...result, fetchedAt: new Date() };
+      const [live, rates] = await Promise.all([
+        api('/api/live-status'),
+        api('/api/rates')
+      ]);
+      lastSettings = { ...live, fetchedAt: new Date(), ratePlan: rates?.effective || null };
       settingsFetched = true;
       renderSettings();
     }
@@ -215,6 +230,8 @@ function renderSettings() {
     ['Island status', formatStringOrDash(live.island_status)],
     ['Reported at', formatTimestamp(live.timestamp)]
   ], els.settingsLive);
+
+  renderRatePlanCard(els.settingsRatePlan, lastSettings.ratePlan, new Date());
 
   els.settingsRawSiteInfo.textContent = JSON.stringify(lastSettings.siteInfo, null, 2);
   els.settingsRawLive.textContent = JSON.stringify(lastSettings.live, null, 2);
@@ -324,10 +341,10 @@ function setView(view) {
   els.netBillingView.classList.toggle('hidden', selected !== 'net-billing');
   els.touCostView.classList.toggle('hidden', selected !== 'tou-cost');
   els.settingsView.classList.toggle('hidden', selected !== 'settings');
+  els.ratesView.classList.toggle('hidden', selected !== 'rates');
   els.activityView.classList.toggle('hidden', selected !== 'activity');
-  if (selected === 'settings' && !settingsFetched) {
-    refreshSettings();
-  }
+  if (selected === 'settings' && !settingsFetched) refreshSettings();
+  if (selected === 'rates' && !ratesFetched) loadRates();
 }
 
 function render() {
@@ -673,22 +690,29 @@ function renderTouReport(report) {
     els.touSummary.append(item);
   }
 
+  const tariffSource = report.tariff?.source || 'tesla';
+  const sourceLabel = tariffSource === 'custom' ? 'custom override' : (report.tariff?.code || 'tesla tariff');
   els.touTariffNote.textContent = report.tariff
-    ? `Tariff: ${report.tariff.code || '(unnamed)'} — ${report.tariff.utility || ''}. Sell rate from sell_tariff; NEM 3.0 actual export values may differ.`
+    ? `Rate plan source: ${sourceLabel}. ${tariffSource === 'tesla' ? 'Sell rate from sell_tariff; NEM 3.0 actual export values may differ.' : 'Sell rates from your custom configuration.'}`
     : '';
+
+  renderRatePlanCard(els.touRatePlan, report.tariff, null);
 
   els.touCostRows.replaceChildren();
   for (const day of report.days || []) {
-    const offPeak = day.periods?.find(p => p.period === 'OFF_PEAK') || { importedKwh: 0, importCost: 0 };
-    const onPeak = day.periods?.find(p => p.period === 'ON_PEAK') || { importedKwh: 0, importCost: 0 };
+    const off = findPeriodByMatcher(day.periods, isClientOffPeak);
+    const partial = findPeriodByMatcher(day.periods, isClientPartialPeak);
+    const peak = findPeriodByMatcher(day.periods, isClientPeak);
     const tr = document.createElement('tr');
     appendCells(tr, [
       day.date,
       day.seasonLabel || '',
-      formatKwh(offPeak.importedKwh),
-      formatCurrency(offPeak.importCost),
-      formatKwh(onPeak.importedKwh),
-      formatCurrency(onPeak.importCost),
+      formatKwh(off.importedKwh),
+      formatCurrency(off.importCost),
+      partial ? formatKwh(partial.importedKwh) : '—',
+      partial ? formatCurrency(partial.importCost) : '—',
+      formatKwh(peak.importedKwh),
+      formatCurrency(peak.importCost),
       formatCurrency(day.exportCredit),
       formatCurrency(day.netCost)
     ]);
@@ -699,15 +723,20 @@ function renderTouReport(report) {
   if (report.days?.length) {
     const tr = document.createElement('tr');
     tr.className = 'totals-row';
-    const offPeakTotal = report.totals?.periodTotals?.OFF_PEAK || { importedKwh: 0, importCost: 0 };
-    const onPeakTotal = report.totals?.periodTotals?.ON_PEAK || { importedKwh: 0, importCost: 0 };
+    const totalsByName = report.totals?.periodTotals || {};
+    const off = sumPeriodTotalsByMatcher(totalsByName, isClientOffPeak);
+    const partial = sumPeriodTotalsByMatcher(totalsByName, isClientPartialPeak);
+    const peak = sumPeriodTotalsByMatcher(totalsByName, isClientPeak);
+    const hasPartial = Object.keys(totalsByName).some(n => isClientPartialPeak(n));
     appendCells(tr, [
       'Totals',
       '',
-      formatKwh(offPeakTotal.importedKwh),
-      formatCurrency(offPeakTotal.importCost),
-      formatKwh(onPeakTotal.importedKwh),
-      formatCurrency(onPeakTotal.importCost),
+      formatKwh(off.importedKwh),
+      formatCurrency(off.importCost),
+      hasPartial ? formatKwh(partial.importedKwh) : '—',
+      hasPartial ? formatCurrency(partial.importCost) : '—',
+      formatKwh(peak.importedKwh),
+      formatCurrency(peak.importCost),
       formatCurrency(report.totals?.exportCredit ?? 0),
       formatCurrency(report.totals?.netCost ?? 0)
     ]);
@@ -738,21 +767,37 @@ function renderTouReport(report) {
 function formatTouReportText(report) {
   const totals = report.totals || {};
   const peakDays = (report.days || []).filter(d => d.peakImportKwh > 0.1);
-  const offPeakTotal = report.totals?.periodTotals?.OFF_PEAK || { importedKwh: 0, importCost: 0 };
-  const onPeakTotal = report.totals?.periodTotals?.ON_PEAK || { importedKwh: 0, importCost: 0 };
+  const totalsByName = report.totals?.periodTotals || {};
+  const offTotal = sumPeriodTotalsByMatcher(totalsByName, isClientOffPeak);
+  const partialTotal = sumPeriodTotalsByMatcher(totalsByName, isClientPartialPeak);
+  const peakTotal = sumPeriodTotalsByMatcher(totalsByName, isClientPeak);
+  const hasPartial = Object.keys(totalsByName).some(n => isClientPartialPeak(n));
   const tariffLabel = report.tariff?.code || '(unknown)';
+  const tariffSource = report.tariff?.source || 'tesla';
 
   const verdict = peakDays.length === 0
-    ? `No days had material peak-hour grid imports (> 0.1 kWh). The schedule kept load off the grid during the 4–9 PM peak window.`
+    ? `No days had material peak-hour grid imports (> 0.1 kWh). The schedule kept load off the grid during the peak window.`
     : `${peakDays.length} day(s) had measurable peak-hour grid imports (> 0.1 kWh): ${peakDays.map(d => d.date).join(', ')}. ` +
-      `On those days the battery did not fully carry the home through the 4–9 PM peak — check whether SOE hit the reserve floor early.`;
+      `On those days the battery did not fully carry the home through the peak window — check whether SOE hit the reserve floor early.`;
 
   const lines = [
     'Tesla Powerwall — TOU Cost Audit',
     `Site: ${report.siteId}`,
     `Range: ${report.startDate} to ${report.endDate}   (${(report.days || []).length} day(s))`,
     `Timezone: ${report.timeZone}`,
-    `Tariff: ${tariffLabel} — ${report.tariff?.utility || ''}`.trim(),
+    `Rate plan: ${tariffLabel} — ${report.tariff?.utility || ''} [source: ${tariffSource}]`.trim(),
+    '',
+    'RATE STRUCTURE'
+  ];
+  for (const season of report.tariff?.seasons || []) {
+    lines.push(`  ${season.label} (${describeSeasonMonths(season)})`);
+    for (const period of season.periods || []) {
+      const w = period.windows?.[0];
+      const window = w ? `${formatMinutesAsTime(w.startMin)}–${formatMinutesAsTime(w.endMin)}` : '—';
+      lines.push(`    ${padEnd(period.name, 14)} ${padEnd(window, 13)}  buy $${Number(period.buyRate || 0).toFixed(5)}/kWh   sell $${Number(period.sellRate || 0).toFixed(5)}/kWh`);
+    }
+  }
+  lines.push(
     '',
     'WHAT THIS REPORT SHOWS',
     'Under PG&E TOU-C, electricity is more expensive 4–9 PM every day ("Peak")',
@@ -783,27 +828,47 @@ function formatTouReportText(report) {
     `  Net cost (period):           ${formatCurrency(totals.netCost)}`,
     `  Import cost:                 ${formatCurrency(totals.importCost)}`,
     `  Export credit:               ${formatCurrency(totals.exportCredit)}`,
-    `  Off-peak import:             ${formatKwh(offPeakTotal.importedKwh)} kWh  (${formatCurrency(offPeakTotal.importCost)})`,
-    `  Peak import:                 ${formatKwh(onPeakTotal.importedKwh)} kWh  (${formatCurrency(onPeakTotal.importCost)})`,
+    `  Off-peak import:             ${formatKwh(offTotal.importedKwh)} kWh  (${formatCurrency(offTotal.importCost)})`
+  );
+  if (hasPartial) {
+    lines.push(`  Partial-peak import:         ${formatKwh(partialTotal.importedKwh)} kWh  (${formatCurrency(partialTotal.importCost)})`);
+  }
+  lines.push(
+    `  Peak import:                 ${formatKwh(peakTotal.importedKwh)} kWh  (${formatCurrency(peakTotal.importCost)})`,
     `  % peak load from battery:    ${totals.peakAudit?.percentLoadFromBattery == null ? '—' : `${totals.peakAudit.percentLoadFromBattery}%`}`,
     '',
     'VERDICT',
     `  ${verdict}`,
     '',
     'DAILY PG&E COST BY TOU PERIOD',
-    `${padEnd('Date', 12)} ${padEnd('Season', 8)} ${pad('OffPk kWh', 10)} ${pad('OffPk $', 10)} ${pad('Peak kWh', 10)} ${pad('Peak $', 10)} ${pad('Export $', 10)} ${pad('Net $', 10)}`
-  ];
+    hasPartial
+      ? `${padEnd('Date', 12)} ${padEnd('Season', 8)} ${pad('Off kWh', 9)} ${pad('Off $', 8)} ${pad('Part kWh', 9)} ${pad('Part $', 8)} ${pad('Peak kWh', 9)} ${pad('Peak $', 8)} ${pad('Export $', 9)} ${pad('Net $', 9)}`
+      : `${padEnd('Date', 12)} ${padEnd('Season', 8)} ${pad('Off kWh', 10)} ${pad('Off $', 10)} ${pad('Peak kWh', 10)} ${pad('Peak $', 10)} ${pad('Export $', 10)} ${pad('Net $', 10)}`
+  );
 
   for (const day of report.days || []) {
-    const off = day.periods?.find(p => p.period === 'OFF_PEAK') || { importedKwh: 0, importCost: 0 };
-    const on = day.periods?.find(p => p.period === 'ON_PEAK') || { importedKwh: 0, importCost: 0 };
+    const off = findPeriodByMatcher(day.periods, isClientOffPeak);
+    const partial = findPeriodByMatcher(day.periods, isClientPartialPeak);
+    const peak = findPeriodByMatcher(day.periods, isClientPeak);
+    if (hasPartial) {
+      lines.push(
+        `${padEnd(day.date, 12)} ${padEnd(day.seasonLabel || '', 8)} ${pad(formatKwh(off.importedKwh), 9)} ${pad(formatCurrency(off.importCost), 8)} ${pad(formatKwh(partial.importedKwh), 9)} ${pad(formatCurrency(partial.importCost), 8)} ${pad(formatKwh(peak.importedKwh), 9)} ${pad(formatCurrency(peak.importCost), 8)} ${pad(formatCurrency(day.exportCredit), 9)} ${pad(formatCurrency(day.netCost), 9)}`
+      );
+    } else {
+      lines.push(
+        `${padEnd(day.date, 12)} ${padEnd(day.seasonLabel || '', 8)} ${pad(formatKwh(off.importedKwh), 10)} ${pad(formatCurrency(off.importCost), 10)} ${pad(formatKwh(peak.importedKwh), 10)} ${pad(formatCurrency(peak.importCost), 10)} ${pad(formatCurrency(day.exportCredit), 10)} ${pad(formatCurrency(day.netCost), 10)}`
+      );
+    }
+  }
+  if (hasPartial) {
     lines.push(
-      `${padEnd(day.date, 12)} ${padEnd(day.seasonLabel || '', 8)} ${pad(formatKwh(off.importedKwh), 10)} ${pad(formatCurrency(off.importCost), 10)} ${pad(formatKwh(on.importedKwh), 10)} ${pad(formatCurrency(on.importCost), 10)} ${pad(formatCurrency(day.exportCredit), 10)} ${pad(formatCurrency(day.netCost), 10)}`
+      `${padEnd('TOTALS', 12)} ${padEnd('', 8)} ${pad(formatKwh(offTotal.importedKwh), 9)} ${pad(formatCurrency(offTotal.importCost), 8)} ${pad(formatKwh(partialTotal.importedKwh), 9)} ${pad(formatCurrency(partialTotal.importCost), 8)} ${pad(formatKwh(peakTotal.importedKwh), 9)} ${pad(formatCurrency(peakTotal.importCost), 8)} ${pad(formatCurrency(totals.exportCredit ?? 0), 9)} ${pad(formatCurrency(totals.netCost ?? 0), 9)}`
+    );
+  } else {
+    lines.push(
+      `${padEnd('TOTALS', 12)} ${padEnd('', 8)} ${pad(formatKwh(offTotal.importedKwh), 10)} ${pad(formatCurrency(offTotal.importCost), 10)} ${pad(formatKwh(peakTotal.importedKwh), 10)} ${pad(formatCurrency(peakTotal.importCost), 10)} ${pad(formatCurrency(totals.exportCredit ?? 0), 10)} ${pad(formatCurrency(totals.netCost ?? 0), 10)}`
     );
   }
-  lines.push(
-    `${padEnd('TOTALS', 12)} ${padEnd('', 8)} ${pad(formatKwh(offPeakTotal.importedKwh), 10)} ${pad(formatCurrency(offPeakTotal.importCost), 10)} ${pad(formatKwh(onPeakTotal.importedKwh), 10)} ${pad(formatCurrency(onPeakTotal.importCost), 10)} ${pad(formatCurrency(totals.exportCredit ?? 0), 10)} ${pad(formatCurrency(totals.netCost ?? 0), 10)}`
-  );
 
   lines.push(
     '',
@@ -819,6 +884,143 @@ function formatTouReportText(report) {
   }
 
   return lines.join('\n');
+}
+
+function isClientPeak(name) {
+  const n = String(name || '').toLowerCase().replace(/[_\s-]/g, '');
+  if (n.includes('partial') || n.includes('mid')) return false;
+  if (n.includes('off')) return false;
+  return n.includes('peak');
+}
+function isClientPartialPeak(name) {
+  const n = String(name || '').toLowerCase().replace(/[_\s-]/g, '');
+  return n.includes('partial') || n.includes('mid');
+}
+function isClientOffPeak(name) {
+  const n = String(name || '').toLowerCase().replace(/[_\s-]/g, '');
+  return n.includes('off');
+}
+
+function findPeriodByMatcher(periods, matcher) {
+  return (periods || []).find(p => matcher(p.period)) || { importedKwh: 0, importCost: 0, exportedKwh: 0, exportCredit: 0 };
+}
+
+function sumPeriodTotalsByMatcher(totalsByName, matcher) {
+  const out = { importedKwh: 0, importCost: 0, exportedKwh: 0, exportCredit: 0 };
+  for (const [name, totals] of Object.entries(totalsByName || {})) {
+    if (!matcher(name)) continue;
+    out.importedKwh += totals.importedKwh || 0;
+    out.importCost += totals.importCost || 0;
+    out.exportedKwh += totals.exportedKwh || 0;
+    out.exportCredit += totals.exportCredit || 0;
+  }
+  return out;
+}
+
+function renderRatePlanCard(host, plan, currentDate) {
+  host.replaceChildren();
+  if (!plan) {
+    host.textContent = 'No rate plan available.';
+    return;
+  }
+  const heading = document.createElement('h4');
+  heading.textContent = plan.name || plan.code || 'Rate Plan';
+  const tag = document.createElement('span');
+  tag.className = 'rate-source-tag';
+  tag.textContent = plan.source === 'custom' ? 'custom' : 'tesla';
+  heading.append(tag);
+  host.append(heading);
+
+  const now = currentDate || new Date();
+  const todayMonth = now.getMonth() + 1;
+  const todayDay = now.getDate();
+  const todayMinutes = now.getHours() * 60 + now.getMinutes();
+
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr><th>Season</th><th>Months</th><th>Period</th><th>Hours</th><th>Buy $/kWh</th><th>Sell $/kWh</th></tr>';
+  table.append(thead);
+  const tbody = document.createElement('tbody');
+
+  for (const season of plan.seasons || []) {
+    const isCurrentSeason = matchSeason(season, todayMonth, todayDay);
+    const monthsText = describeSeasonMonths(season);
+    for (const [pi, period] of (season.periods || []).entries()) {
+      const tr = document.createElement('tr');
+      if (isCurrentSeason) tr.classList.add('current-season');
+      const window = period.windows?.[0];
+      const inWindow = window && timeInWindowClient(todayMinutes, window.startMin, window.endMin);
+      if (isCurrentSeason && inWindow) tr.classList.add('current-period');
+
+      const tdSeason = document.createElement('td');
+      if (pi === 0) tdSeason.textContent = season.label;
+      tr.append(tdSeason);
+      const tdMonths = document.createElement('td');
+      if (pi === 0) tdMonths.textContent = monthsText;
+      tr.append(tdMonths);
+      tr.append(tdText(period.name || ''));
+      tr.append(tdText(window ? `${formatMinutesAsTime(window.startMin)}–${formatMinutesAsTime(window.endMin)}` : '—'));
+      tr.append(tdText(`$${Number(period.buyRate || 0).toFixed(5)}`));
+      tr.append(tdText(`$${Number(period.sellRate || 0).toFixed(5)}`));
+      tbody.append(tr);
+    }
+  }
+  table.append(tbody);
+  host.append(table);
+}
+
+function matchSeason(season, month, day) {
+  // Custom plan: range is [startMonth/startDay, nextStartMonth/nextStartDay).
+  if (season.nextStartMonth != null) {
+    const cur = month * 100 + day;
+    const start = Number(season.startMonth) * 100 + Number(season.startDay);
+    const end = Number(season.nextStartMonth) * 100 + Number(season.nextStartDay);
+    if (start === end) return true;
+    if (start < end) return cur >= start && cur < end;
+    return cur >= start || cur < end;
+  }
+  // Tesla plan: range is fromMonth..toMonth (with possible month wrap).
+  if (season.fromMonth != null && season.toMonth != null) {
+    const from = Number(season.fromMonth);
+    const to = Number(season.toMonth);
+    if (from <= to) return month >= from && month <= to;
+    return month >= from || month <= to;
+  }
+  return false;
+}
+
+function describeSeasonMonths(season) {
+  if (season.fromMonth != null && season.toMonth != null) {
+    return `${monthName(season.fromMonth)}–${monthName(season.toMonth)}`;
+  }
+  if (season.startMonth != null) {
+    const next = season.nextStartMonth;
+    if (next != null) {
+      const lastMonth = ((next - 2 + 12) % 12) + 1;
+      return `${monthName(season.startMonth)} ${season.startDay}–${monthName(lastMonth)}`;
+    }
+    return `starts ${monthName(season.startMonth)} ${season.startDay}`;
+  }
+  return '—';
+}
+
+function monthName(m) {
+  return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][Math.max(1, Math.min(12, Number(m))) - 1];
+}
+
+function timeInWindowClient(cur, startMin, endMin) {
+  if (startMin == null || endMin == null) return false;
+  if (startMin === endMin) return true;
+  if (startMin < endMin) return cur >= startMin && cur < endMin;
+  return cur >= startMin || cur < endMin;
+}
+
+function formatMinutesAsTime(min) {
+  if (min == null) return '—';
+  const m = Math.max(0, Math.min(1440, Math.round(min)));
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
 function appendCells(tr, values) {
@@ -1109,6 +1311,334 @@ function summarizeLaunchd(launchd) {
   if (launchd.unchanged?.length && parts.length === 0) parts.push(`${launchd.unchanged.length} unchanged`);
   return parts.length ? `Launchd: ${parts.join(', ')}.` : 'Launchd: no jobs.';
 }
+
+// ---- Rates tab -------------------------------------------------------------
+
+const DEFAULT_PERIODS = [
+  { name: 'Off-Peak',             startTime: '00:00', endTime: '15:00', buyRate: 0, sellRate: 0.03 },
+  { name: 'Partial-Peak Morning', startTime: '15:00', endTime: '16:00', buyRate: 0, sellRate: 0.03 },
+  { name: 'Peak',                 startTime: '16:00', endTime: '21:00', buyRate: 0, sellRate: 0.03 },
+  { name: 'Partial-Peak Evening', startTime: '21:00', endTime: '24:00', buyRate: 0, sellRate: 0.03 }
+];
+
+const DEFAULT_DRAFT = {
+  enabled: false,
+  seasons: [
+    { name: 'Summer', startMonth: 6,  startDay: 1, periods: DEFAULT_PERIODS.map(p => ({ ...p })) },
+    { name: 'Winter', startMonth: 10, startDay: 1, periods: DEFAULT_PERIODS.map(p => ({ ...p })) }
+  ]
+};
+
+async function loadRates() {
+  try {
+    const data = await api('/api/rates');
+    ratesTeslaFallback = data.tesla;
+    ratesDraft = data.custom
+      ? deepClone(data.custom)
+      : seedFromTesla(data.tesla);
+    ratesFetched = true;
+    renderRates();
+  } catch (error) {
+    setStatus(els.ratesStatus, error.message, 'error');
+  }
+}
+
+function seedFromTesla(teslaPlan) {
+  // Tesla plan has ON_PEAK + OFF_PEAK only. Synthesize a Partial-Peak shell so
+  // the user has a starting point matching what they actually pay.
+  if (!teslaPlan?.seasons?.length) return deepClone(DEFAULT_DRAFT);
+  return {
+    enabled: false,
+    seasons: teslaPlan.seasons.map(season => {
+      const periods = [];
+      for (const p of season.periods || []) {
+        const w = p.windows?.[0];
+        periods.push({
+          name: humanPeriodName(p.name),
+          startTime: minutesToTime(w?.startMin),
+          endTime: minutesToTime(w?.endMin),
+          buyRate: Number(p.buyRate || 0),
+          sellRate: Number(p.sellRate || 0)
+        });
+      }
+      // Sort Off-Peak / Partial-Peak / Peak for editing.
+      periods.sort((a, b) => periodSortKey(a.name) - periodSortKey(b.name));
+      return {
+        name: season.label,
+        startMonth: Number(season.startMonth) || Number(season.fromMonth) || 1,
+        startDay: Number(season.startDay) || 1,
+        periods
+      };
+    })
+  };
+}
+
+function humanPeriodName(raw) {
+  const n = String(raw || '').toLowerCase().replace(/[_\s-]/g, '');
+  if (n === 'onpeak' || n === 'peak') return 'Peak';
+  if (n === 'partialpeak' || n === 'midpeak') return 'Partial-Peak';
+  if (n === 'offpeak') return 'Off-Peak';
+  return raw;
+}
+
+function periodSortKey(name) {
+  if (isClientOffPeak(name)) return 0;
+  if (isClientPartialPeak(name)) return 1;
+  if (isClientPeak(name)) return 2;
+  return 3;
+}
+
+function minutesToTime(min) {
+  if (min == null) return '00:00';
+  const m = Math.max(0, Math.min(1440, Math.round(min)));
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
+function timeToMinutes(text) {
+  const m = String(text || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h < 0 || h > 24 || min < 0 || min > 59) return null;
+  if (h === 24 && min !== 0) return null;
+  return h * 60 + min;
+}
+
+function deepClone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function renderRates() {
+  els.ratesEnabled.checked = !!ratesDraft.enabled;
+  els.ratesSourceTag.textContent = ratesDraft.enabled
+    ? 'Custom rates in use'
+    : `Tesla data in use${ratesTeslaFallback?.code ? ` (${ratesTeslaFallback.code})` : ''}`;
+  els.ratesView.classList.toggle('rates-disabled', !ratesDraft.enabled);
+
+  els.ratesSeasons.replaceChildren();
+  for (const [si, season] of ratesDraft.seasons.entries()) {
+    els.ratesSeasons.append(renderSeasonCard(si, season));
+  }
+  renderRatesValidation();
+}
+
+function renderSeasonCard(seasonIndex, season) {
+  const card = document.createElement('div');
+  card.className = 'rate-season';
+
+  const h = document.createElement('h3');
+  h.textContent = season.name || `Season ${seasonIndex + 1}`;
+  card.append(h);
+
+  const meta = document.createElement('div');
+  meta.className = 'rate-season-meta';
+  meta.append(numberInput('Start month', season.startMonth, 1, 12, v => { season.startMonth = v; renderRatesValidation(); }));
+  meta.append(numberInput('Start day',   season.startDay,   1, 31, v => { season.startDay = v; renderRatesValidation(); }));
+  card.append(meta);
+
+  const table = document.createElement('table');
+  table.className = 'rate-period-table';
+  const head = document.createElement('thead');
+  head.innerHTML = '<tr><th>Period</th><th>Start</th><th>End</th><th>Buy $/kWh</th><th>Sell $/kWh</th><th></th></tr>';
+  table.append(head);
+  const body = document.createElement('tbody');
+  for (const [pi, period] of season.periods.entries()) {
+    body.append(renderPeriodRow(season, pi));
+  }
+  table.append(body);
+  card.append(table);
+
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'add-period';
+  addBtn.textContent = '+ Add period';
+  addBtn.addEventListener('click', () => {
+    season.periods.push({
+      name: 'Partial-Peak',
+      startTime: '00:00',
+      endTime: '00:00',
+      buyRate: 0,
+      sellRate: 0.03
+    });
+    renderRates();
+  });
+  card.append(addBtn);
+
+  const coverage = document.createElement('div');
+  coverage.className = 'rate-season-coverage';
+  coverage.dataset.seasonIndex = String(seasonIndex);
+  card.append(coverage);
+
+  return card;
+}
+
+function renderPeriodRow(season, periodIndex) {
+  const period = season.periods[periodIndex];
+  const tr = document.createElement('tr');
+  tr.append(tdName(period.name, v => { period.name = v; renderRatesValidation(); }));
+  tr.append(tdTime(period.startTime, v => { period.startTime = v; renderRatesValidation(); }));
+  tr.append(tdTime(period.endTime,   v => { period.endTime = v; renderRatesValidation(); }));
+  tr.append(tdRate(period.buyRate,   v => { period.buyRate = v; }));
+  tr.append(tdRate(period.sellRate,  v => { period.sellRate = v; }));
+  tr.append(tdRemove(() => {
+    season.periods.splice(periodIndex, 1);
+    renderRates();
+  }));
+  return tr;
+}
+
+function tdName(value, onChange) {
+  const td = document.createElement('td');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = value;
+  input.placeholder = 'Period name';
+  input.className = 'period-name';
+  input.addEventListener('change', () => onChange(input.value));
+  td.append(input);
+  return td;
+}
+
+function tdRemove(onClick) {
+  const td = document.createElement('td');
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'remove-period';
+  btn.textContent = '✕';
+  btn.title = 'Remove period';
+  btn.addEventListener('click', onClick);
+  td.append(btn);
+  return td;
+}
+
+function tdText(value) {
+  const td = document.createElement('td');
+  td.textContent = value;
+  return td;
+}
+
+function tdTime(value, onChange) {
+  const td = document.createElement('td');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = value;
+  input.placeholder = 'HH:MM';
+  input.addEventListener('change', () => onChange(input.value));
+  td.append(input);
+  return td;
+}
+
+function tdRate(value, onChange) {
+  const td = document.createElement('td');
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.step = '0.001';
+  input.min = '0';
+  input.value = String(value);
+  input.addEventListener('change', () => onChange(Number(input.value)));
+  td.append(input);
+  return td;
+}
+
+function numberInput(label, value, min, max, onChange) {
+  const wrap = document.createElement('label');
+  const span = document.createElement('span');
+  span.textContent = label;
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.min = String(min);
+  input.max = String(max);
+  input.value = String(value);
+  input.addEventListener('change', () => onChange(Number(input.value)));
+  wrap.append(span, input);
+  return wrap;
+}
+
+function renderRatesValidation() {
+  const errors = validateRatesDraft(ratesDraft);
+  els.ratesSave.disabled = errors.length > 0;
+  // Per-season coverage badges.
+  for (const div of els.ratesSeasons.querySelectorAll('.rate-season-coverage')) {
+    const si = Number(div.dataset.seasonIndex);
+    const seasonErrors = errors.filter(e => e.seasonIndex === si);
+    if (seasonErrors.length) {
+      div.textContent = '✗ ' + seasonErrors.map(e => e.message).join('; ');
+      div.classList.remove('ok'); div.classList.add('error');
+    } else {
+      div.textContent = '✓ 24h covered, no overlaps';
+      div.classList.remove('error'); div.classList.add('ok');
+    }
+  }
+  if (errors.length === 0) {
+    els.ratesValidation.textContent = '';
+  } else {
+    const generic = errors.filter(e => e.seasonIndex == null).map(e => e.message);
+    els.ratesValidation.textContent = generic.length ? generic.join(' • ') : '';
+  }
+}
+
+function validateRatesDraft(draft) {
+  const errors = [];
+  if (!draft?.seasons?.length) {
+    errors.push({ message: 'At least one season required.' });
+    return errors;
+  }
+  for (const [si, season] of draft.seasons.entries()) {
+    if (!Number.isInteger(season.startMonth) || season.startMonth < 1 || season.startMonth > 12) {
+      errors.push({ seasonIndex: si, message: 'Start month must be 1–12' });
+    }
+    if (!Number.isInteger(season.startDay) || season.startDay < 1 || season.startDay > 31) {
+      errors.push({ seasonIndex: si, message: 'Start day must be 1–31' });
+    }
+    const coverage = new Array(1440).fill(0);
+    for (const period of season.periods || []) {
+      const start = timeToMinutes(period.startTime);
+      const end = timeToMinutes(period.endTime);
+      if (start == null || end == null) {
+        errors.push({ seasonIndex: si, message: `${period.name}: invalid time` });
+        continue;
+      }
+      if (!(Number(period.buyRate) >= 0)) {
+        errors.push({ seasonIndex: si, message: `${period.name}: buy rate ≥ 0` });
+      }
+      const endNorm = end === 0 ? 1440 : end;
+      if (start < endNorm) {
+        for (let i = start; i < endNorm; i++) coverage[i]++;
+      } else {
+        for (let i = start; i < 1440; i++) coverage[i]++;
+        for (let i = 0; i < endNorm; i++) coverage[i]++;
+      }
+    }
+    if (coverage.some(v => v > 1)) errors.push({ seasonIndex: si, message: 'periods overlap' });
+    if (coverage.some(v => v === 0)) errors.push({ seasonIndex: si, message: 'periods leave gaps' });
+  }
+  return errors;
+}
+
+els.ratesEnabled.addEventListener('change', () => {
+  ratesDraft.enabled = els.ratesEnabled.checked;
+  els.ratesView.classList.toggle('rates-disabled', !ratesDraft.enabled);
+  els.ratesSourceTag.textContent = ratesDraft.enabled
+    ? 'Custom rates in use'
+    : `Tesla data in use${ratesTeslaFallback?.code ? ` (${ratesTeslaFallback.code})` : ''}`;
+});
+
+els.ratesSave.addEventListener('click', async () => {
+  await runWithFeedback({
+    buttons: [els.ratesSave],
+    pendingText: 'Saving...',
+    successText: 'Save',
+    statusEl: els.ratesStatus,
+    pendingMessage: 'Saving rate structure...',
+    successMessage: 'Rate structure saved.',
+    task: async () => {
+      const result = await api('/api/rates', { method: 'POST', body: ratesDraft });
+      if (!result.ok) throw new Error((result.errors || ['Save failed']).join('; '));
+    }
+  });
+});
 
 function clearStatusLater(element) {
   const message = element.textContent;

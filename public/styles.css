@@ -336,6 +336,166 @@ tr.totals-row td {
   color: rgb(110, 200, 130);
 }
 
+.rates-enable {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 10px 0 16px;
+}
+
+.rates-seasons {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: 1fr;
+}
+
+.rate-season {
+  border: 1px solid var(--muted);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.rate-season h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.rate-season-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.rate-season-meta label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.rate-season-meta input[type="number"] {
+  width: 64px;
+}
+
+.rate-period-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.rate-period-table th, .rate-period-table td {
+  padding: 6px 4px;
+  text-align: left;
+  font-size: 13px;
+}
+
+.rate-period-table input[type="time"],
+.rate-period-table input[type="text"] {
+  width: 84px;
+}
+
+.rate-period-table input[type="number"] {
+  width: 72px;
+  -moz-appearance: textfield;
+}
+
+.rate-period-table input[type="number"]::-webkit-outer-spin-button,
+.rate-period-table input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.rate-period-table input.period-name {
+  width: 180px;
+}
+
+.rate-period-table button.remove-period {
+  background: transparent;
+  border: 1px solid var(--muted);
+  color: var(--muted);
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.rate-period-table button.remove-period:hover {
+  color: rgb(220, 110, 110);
+  border-color: rgb(220, 110, 110);
+}
+
+button.add-period {
+  margin-top: 8px;
+  background: transparent;
+  border: 1px dashed var(--muted);
+  color: var(--muted);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+button.add-period:hover {
+  color: inherit;
+  border-style: solid;
+}
+
+.rate-season-coverage {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.rate-season-coverage.ok {
+  color: rgb(110, 200, 130);
+}
+
+.rate-season-coverage.error {
+  color: rgb(220, 110, 110);
+}
+
+.rates-disabled .rate-season input {
+  opacity: 0.6;
+}
+
+.rate-plan-block {
+  margin: 10px 0;
+}
+
+.rate-plan-block h4 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.rate-plan-block table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.rate-plan-block th, .rate-plan-block td {
+  padding: 4px 8px;
+  font-size: 13px;
+  text-align: left;
+}
+
+.rate-plan-block tr.current-season td {
+  background: rgba(110, 200, 130, 0.10);
+}
+
+.rate-plan-block tr.current-period td {
+  font-weight: 600;
+}
+
+.rate-source-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  margin-left: 6px;
+}
+
 .schedule-switcher {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

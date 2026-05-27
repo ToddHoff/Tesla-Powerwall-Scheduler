@@ -36,6 +36,7 @@
         <button data-view="net-billing">Net Billing</button>
         <button data-view="tou-cost">TOU Cost</button>
         <button data-view="settings">Settings</button>
+        <button data-view="rates">Rates</button>
         <button data-view="activity">Activity</button>
       </nav>
 
@@ -263,6 +264,7 @@
           <div id="touStatus" class="operation-status" aria-live="polite"></div>
           <div id="touSummary" class="report-summary"></div>
           <div id="touTariffNote" class="muted-meta"></div>
+          <div id="touRatePlan" class="rate-plan-block"></div>
 
           <div class="section-head compact report-subhead">
             <div>
@@ -278,6 +280,8 @@
                   <th>Season</th>
                   <th>Off-Peak kWh</th>
                   <th>Off-Peak $</th>
+                  <th>Part-Peak kWh</th>
+                  <th>Part-Peak $</th>
                   <th>Peak kWh</th>
                   <th>Peak $</th>
                   <th>Export Credit</th>
@@ -341,6 +345,9 @@
         <h3 class="settings-subhead">Managed by scheduler</h3>
         <dl id="settingsManaged" class="settings-grid"></dl>
 
+        <h3 class="settings-subhead">Rate Schedule</h3>
+        <div id="settingsRatePlan" class="rate-plan-block"></div>
+
         <h3 class="settings-subhead">Live snapshot</h3>
         <dl id="settingsLive" class="settings-grid"></dl>
 
@@ -353,6 +360,29 @@
           <summary>Raw live_status</summary>
           <pre id="settingsRawLive"></pre>
         </details>
+      </section>
+
+      <section id="ratesView" class="view-panel panel hidden">
+        <div class="section-head">
+          <div>
+            <h2>Rate Structure</h2>
+            <p>Override the rates Tesla has on file. When enabled, these rates are used by the TOU Cost report and the Settings rate display.</p>
+          </div>
+          <div class="row-actions">
+            <span id="ratesSourceTag" class="muted-meta"></span>
+            <button id="ratesSave" class="primary">Save</button>
+          </div>
+        </div>
+
+        <label class="rates-enable">
+          <input type="checkbox" id="ratesEnabled" />
+          <span>Use custom rates (overrides Tesla's tariff_content)</span>
+        </label>
+
+        <div id="ratesStatus" class="operation-status" aria-live="polite"></div>
+        <div id="ratesValidation" class="muted-meta"></div>
+
+        <div id="ratesSeasons" class="rates-seasons"></div>
       </section>
 
       <section id="activityView" class="view-panel panel log-panel hidden">

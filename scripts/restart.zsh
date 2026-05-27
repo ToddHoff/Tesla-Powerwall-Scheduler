@@ -1,33 +1,31 @@
 #!/bin/zsh
+# Restart the tesla-scheduler server via launchd. The server is supposed to be
+# managed as a LaunchAgent (see scripts/install-launchd.zsh). Using `launchctl
+# kickstart -k` instead of nohup means the supervisor restarts the process on
+# crash and after wake, which is what keeps it alive overnight.
 set -euo pipefail
 
 APP_DIR="${0:A:h:h}"
-LOG_FILE="${APP_DIR}/logs/server.out.log"
+LABEL="com.toddhoff.tesla-scheduler"
+PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 PORT="${PORT:-8787}"
+DOMAIN="gui/$(id -u)"
 
 cd "${APP_DIR}"
-mkdir -p logs
 
-EXISTING_PID="$(lsof -ti :${PORT} 2>/dev/null || true)"
-if [[ -n "${EXISTING_PID}" ]]; then
-  echo "Stopping node on :${PORT} (pid ${EXISTING_PID})"
-  kill "${EXISTING_PID}" 2>/dev/null || true
-  for _ in {1..20}; do
-    sleep 0.25
-    lsof -ti :${PORT} >/dev/null 2>&1 || break
-  done
-  if lsof -ti :${PORT} >/dev/null 2>&1; then
-    echo "Process did not exit, sending SIGKILL"
-    kill -9 "${EXISTING_PID}" 2>/dev/null || true
-    sleep 0.5
-  fi
+if [[ ! -f "${PLIST}" ]]; then
+  echo "LaunchAgent plist not found: ${PLIST}"
+  echo "Run scripts/install-launchd.zsh once to register the supervised server."
+  exit 1
 fi
 
-echo "Starting node server.mjs"
-nohup node server.mjs > "${LOG_FILE}" 2>&1 &
-NEW_PID=$!
-disown
-echo "Started pid=${NEW_PID}"
+if ! launchctl print "${DOMAIN}/${LABEL}" >/dev/null 2>&1; then
+  echo "Loading ${LABEL} into ${DOMAIN}"
+  launchctl bootstrap "${DOMAIN}" "${PLIST}"
+fi
+
+echo "Restarting ${LABEL}"
+launchctl kickstart -k "${DOMAIN}/${LABEL}"
 
 for _ in {1..20}; do
   sleep 0.25
@@ -37,6 +35,7 @@ for _ in {1..20}; do
   fi
 done
 
-echo "Server did not respond on :${PORT} within 5s; tail of ${LOG_FILE}:"
-tail -20 "${LOG_FILE}" || true
+echo "Server did not respond on :${PORT} within 5s."
+echo "Tail of logs/launchd.err.log:"
+tail -20 "${APP_DIR}/logs/launchd.err.log" 2>/dev/null || true
 exit 1

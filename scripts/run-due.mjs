@@ -35,7 +35,11 @@ const options = parseArgs();
 try {
   if (options.step) {
     const result = await runStep(options.step, { dryRun: options.dryRun });
-    console.log(JSON.stringify(result, null, 2));
+    // Why: structured logEvent entries already capture everything; the prior
+    // pretty-JSON dump produced ~30 unparseable lines per run in the per-step
+    // log file that the Activity feed couldn't render. CLI users can still
+    // inspect the log files (or run with --print to get the legacy dump).
+    if (hasArg('--print')) console.log(JSON.stringify(result, null, 2));
     process.exit(result.ok ? 0 : 1);
   }
   const result = await runDueSteps(options);

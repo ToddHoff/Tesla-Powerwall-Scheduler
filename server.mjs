@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { readFile, writeFile, mkdir, copyFile, appendFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile, appendFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1249,9 +1249,38 @@ function getNextRun(config) {
 }
 
 async function getRecentLogs() {
-  if (!existsSync(LOG_PATH)) return [];
-  const body = await readFile(LOG_PATH, 'utf8');
-  return body.trim().split(/\r?\n/).filter(Boolean).slice(-80).map(line => safeJson(line));
+  const sources = [{ path: LOG_PATH, source: 'server' }];
+  if (existsSync(LOG_DIR)) {
+    const entries = await readdir(LOG_DIR);
+    for (const name of entries.sort()) {
+      const match = name.match(/^run-(\d{2})(\d{2})\.log$/);
+      if (!match) continue;
+      sources.push({
+        path: path.join(LOG_DIR, name),
+        source: `step ${match[1]}:${match[2]}`
+      });
+    }
+  }
+
+  const all = [];
+  for (const { path: filePath, source } of sources) {
+    if (!existsSync(filePath)) continue;
+    const body = await readFile(filePath, 'utf8');
+    for (const line of body.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      // Skip the multi-line pretty-JSON dumps from older runs by ignoring
+      // lines that don't start with '{"' — those are the inner formatting
+      // lines that aren't standalone JSON entries.
+      if (!trimmed.startsWith('{"')) continue;
+      const parsed = safeJson(trimmed);
+      if (!parsed || typeof parsed !== 'object' || !parsed.ts) continue;
+      all.push({ ...parsed, source });
+    }
+  }
+
+  all.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  return all.slice(-200);
 }
 
 async function logEvent(level, event, details) {

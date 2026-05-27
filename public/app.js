@@ -3,6 +3,7 @@ let selectedScheduleId;
 let latestReport;
 let logOrder = 'desc';
 let lastLogs = [];
+let logSourceFilter = 'all';
 let settingsFetched = false;
 let lastSettings = null;
 
@@ -66,6 +67,7 @@ const els = {
   copyTouReportText: document.querySelector('#copyTouReportText'),
   refreshStatus: document.querySelector('#refreshStatus'),
   logOrderToggle: document.querySelector('#logOrderToggle'),
+  logSourceFilter: document.querySelector('#logSourceFilter'),
   logOutput: document.querySelector('#logOutput')
 };
 
@@ -163,6 +165,11 @@ els.logOrderToggle.addEventListener('click', () => {
   renderLogs();
 });
 updateLogOrderToggle();
+
+els.logSourceFilter.addEventListener('change', () => {
+  logSourceFilter = els.logSourceFilter.value || 'all';
+  renderLogs();
+});
 
 els.settingsRefresh.addEventListener('click', refreshSettings);
 
@@ -521,9 +528,47 @@ async function refreshStatus() {
       const status = await api('/api/status');
       els.nextRunText.textContent = status.nextRun || '--';
       lastLogs = Array.isArray(status.logs) ? status.logs : [];
+      refreshLogSourceFilter();
       renderLogs();
     }
   });
+}
+
+function refreshLogSourceFilter() {
+  const sources = new Set();
+  // Seed with enabled steps from the active schedule so dropdown lists every
+  // step even before it has fired for the first time.
+  const active = config?.schedules?.find(s => s.id === config.activeScheduleId);
+  for (const row of active?.schedule || []) {
+    if (row?.enabled && row.time) sources.add(`step ${row.time}`);
+  }
+  // Add any sources that have actually logged (covers disabled-then-fired
+  // steps, server entries, and anything else on disk).
+  for (const entry of lastLogs) {
+    if (entry?.source) sources.add(entry.source);
+  }
+  const ordered = [...sources].sort((a, b) => {
+    if (a === 'server') return -1;
+    if (b === 'server') return 1;
+    return a.localeCompare(b);
+  });
+  const previous = els.logSourceFilter.value || logSourceFilter;
+  els.logSourceFilter.replaceChildren();
+  const allOpt = document.createElement('option');
+  allOpt.value = 'all';
+  allOpt.textContent = `All (${lastLogs.length})`;
+  els.logSourceFilter.append(allOpt);
+  for (const source of ordered) {
+    const opt = document.createElement('option');
+    opt.value = source;
+    const count = lastLogs.filter(e => e.source === source).length;
+    opt.textContent = `${source} (${count})`;
+    els.logSourceFilter.append(opt);
+  }
+  // Keep prior selection if still available.
+  const available = ['all', ...ordered];
+  logSourceFilter = available.includes(previous) ? previous : 'all';
+  els.logSourceFilter.value = logSourceFilter;
 }
 
 function renderLogs() {
@@ -531,9 +576,19 @@ function renderLogs() {
     els.logOutput.textContent = 'No activity yet.';
     return;
   }
-  const ordered = logOrder === 'desc' ? [...lastLogs].reverse() : lastLogs;
+  const filtered = logSourceFilter === 'all'
+    ? lastLogs
+    : lastLogs.filter(e => e.source === logSourceFilter);
+  if (!filtered.length) {
+    els.logOutput.textContent = `No entries for source "${logSourceFilter}".`;
+    return;
+  }
+  const ordered = logOrder === 'desc' ? [...filtered].reverse() : filtered;
   els.logOutput.textContent = ordered
-    .map(entry => `${entry.ts} ${entry.level.toUpperCase()} ${entry.event}\n${JSON.stringify(entry.details, null, 2)}`)
+    .map(entry => {
+      const source = entry.source ? `[${entry.source}] ` : '';
+      return `${entry.ts} ${source}${(entry.level || 'info').toUpperCase()} ${entry.event}\n${JSON.stringify(entry.details, null, 2)}`;
+    })
     .join('\n\n');
 }
 

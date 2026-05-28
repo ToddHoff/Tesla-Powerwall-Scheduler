@@ -77,6 +77,7 @@ const els = {
   solarHourlyRows: document.querySelector('#solarHourlyRows'),
   solarReportText: document.querySelector('#solarReportText'),
   copySolarReportText: document.querySelector('#copySolarReportText'),
+  downloadSolarCsv: document.querySelector('#downloadSolarCsv'),
   solarSavingsView: document.querySelector('#solarSavingsView'),
   runTouReport: document.querySelector('#runTouReport'),
   touStartDate: document.querySelector('#touStartDate'),
@@ -157,6 +158,65 @@ els.copySolarReportText.addEventListener('click', async () => {
     task: async () => copyText(els.solarReportText.value)
   });
 });
+
+els.downloadSolarCsv.addEventListener('click', () => {
+  if (!lastSolarReport) {
+    setStatus(els.solarStatus, 'Run the report first.', 'error');
+    return;
+  }
+  const billedRaw = els.solarBilled.value.trim();
+  const billed = billedRaw === '' ? null : Number(billedRaw);
+  const noSolar = lastSolarReport.totals?.noSolarCost ?? 0;
+  const savings = billed == null ? null : noSolar - billed;
+  const csv = buildSolarCsv(lastSolarReport, billed, savings);
+  const filename = `solar-savings-${lastSolarReport.startDate}_${lastSolarReport.endDate}.csv`;
+  downloadFile(filename, csv, 'text/csv');
+  setStatus(els.solarStatus, `Downloaded ${filename} — open or import in Google Sheets.`, 'success');
+});
+
+function buildSolarCsv(report, billed, savings) {
+  const rows = [];
+  // Hourly detail (primary table, imports cleanly into Sheets).
+  rows.push(['Date', 'Season', 'Start', 'End', 'kWh Used', 'Rate Type', 'Rate', 'Cost']);
+  for (const h of report.hours || []) {
+    rows.push([h.date, h.season, h.startTime, h.endTime, formatKwh(h.kwh), h.rateType, Number(h.rate).toFixed(5), Number(h.cost).toFixed(2)]);
+  }
+  // Blank separator, then the per-rate-type summary.
+  rows.push([]);
+  rows.push(['Rate Type', 'kWh Used', 'Cost']);
+  for (const s of report.summary || []) {
+    rows.push([s.rateType, formatKwh(s.kwh), Number(s.cost).toFixed(2)]);
+  }
+  rows.push(['Total', formatKwh(report.totals?.kwh ?? 0), Number(report.totals?.noSolarCost ?? 0).toFixed(2)]);
+  // Blank separator, then the savings block.
+  rows.push([]);
+  rows.push(['Start Date', 'End Date', 'Billed', 'No-Solar Cost', 'Solar Savings']);
+  rows.push([
+    report.startDate,
+    report.endDate,
+    billed == null ? '' : billed.toFixed(2),
+    Number(report.totals?.noSolarCost ?? 0).toFixed(2),
+    savings == null ? '' : savings.toFixed(2)
+  ]);
+  return rows.map(r => r.map(csvCell).join(',')).join('\n');
+}
+
+function csvCell(value) {
+  const s = String(value ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
 els.copyTouReportText.addEventListener('click', async () => {
   await runWithFeedback({

@@ -9,6 +9,7 @@ let lastSettings = null;
 let ratesFetched = false;
 let ratesDraft = null;       // current editable draft
 let ratesTeslaFallback = null;
+let lastSolarReport = null;
 
 const els = {
   viewButtons: [...document.querySelectorAll('.app-tabs button')],
@@ -64,6 +65,19 @@ const els = {
   reportRows: document.querySelector('#reportRows'),
   reportText: document.querySelector('#reportText'),
   copyReportText: document.querySelector('#copyReportText'),
+  runSolarSavings: document.querySelector('#runSolarSavings'),
+  solarStartDate: document.querySelector('#solarStartDate'),
+  solarEndDate: document.querySelector('#solarEndDate'),
+  solarBilled: document.querySelector('#solarBilled'),
+  solarTimeZone: document.querySelector('#solarTimeZone'),
+  solarStatus: document.querySelector('#solarStatus'),
+  solarSummary: document.querySelector('#solarSummary'),
+  solarSummaryRows: document.querySelector('#solarSummaryRows'),
+  solarSummaryTotal: document.querySelector('#solarSummaryTotal'),
+  solarHourlyRows: document.querySelector('#solarHourlyRows'),
+  solarReportText: document.querySelector('#solarReportText'),
+  copySolarReportText: document.querySelector('#copySolarReportText'),
+  solarSavingsView: document.querySelector('#solarSavingsView'),
   runTouReport: document.querySelector('#runTouReport'),
   touStartDate: document.querySelector('#touStartDate'),
   touEndDate: document.querySelector('#touEndDate'),
@@ -130,6 +144,19 @@ els.addRow.addEventListener('click', () => {
 
 els.runNetBillingReport.addEventListener('click', runNetBillingReport);
 els.runTouReport.addEventListener('click', runTouReport);
+els.runSolarSavings.addEventListener('click', runSolarSavings);
+els.solarBilled.addEventListener('input', () => { if (lastSolarReport) renderSolarSavings(lastSolarReport); });
+els.copySolarReportText.addEventListener('click', async () => {
+  await runWithFeedback({
+    buttons: [els.copySolarReportText],
+    pendingText: 'Copying...',
+    successText: 'Copy',
+    statusEl: els.solarStatus,
+    pendingMessage: 'Copying report...',
+    successMessage: 'Copied report.',
+    task: async () => copyText(els.solarReportText.value)
+  });
+});
 
 els.copyTouReportText.addEventListener('click', async () => {
   await runWithFeedback({
@@ -340,6 +367,7 @@ function setView(view) {
   els.schedulesView.classList.toggle('hidden', selected !== 'schedules');
   els.netBillingView.classList.toggle('hidden', selected !== 'net-billing');
   els.touCostView.classList.toggle('hidden', selected !== 'tou-cost');
+  els.solarSavingsView.classList.toggle('hidden', selected !== 'solar-savings');
   els.settingsView.classList.toggle('hidden', selected !== 'settings');
   els.ratesView.classList.toggle('hidden', selected !== 'rates');
   els.activityView.classList.toggle('hidden', selected !== 'activity');
@@ -650,6 +678,122 @@ function renderShareText() {
   els.shareText.value = lines.join('\n').trimEnd();
 }
 
+async function runSolarSavings() {
+  await runWithFeedback({
+    buttons: [els.runSolarSavings],
+    pendingText: 'Running...',
+    successText: 'Run Report',
+    statusEl: els.solarStatus,
+    pendingMessage: 'Fetching home usage and pricing at TOU rates...',
+    successMessage: 'Report complete.',
+    task: async () => {
+      const params = new URLSearchParams({
+        startDate: els.solarStartDate.value,
+        endDate: els.solarEndDate.value,
+        timeZone: els.solarTimeZone.value.trim() || 'America/Los_Angeles'
+      });
+      lastSolarReport = await api(`/api/reports/solar-savings?${params}`);
+      renderSolarSavings(lastSolarReport);
+    }
+  });
+}
+
+function renderSolarSavings(report) {
+  const noSolarCost = report.totals?.noSolarCost ?? 0;
+  const totalKwh = report.totals?.kwh ?? 0;
+  const billedRaw = els.solarBilled.value.trim();
+  const billed = billedRaw === '' ? null : Number(billedRaw);
+  const savings = billed == null ? null : noSolarCost - billed;
+
+  els.solarSummary.replaceChildren();
+  const cards = [
+    ['No-Solar Cost', formatCurrency(noSolarCost)],
+    ['Billed (actual)', billed == null ? '—' : formatCurrency(billed)],
+    ['Solar Savings', savings == null ? '—' : formatCurrency(savings)],
+    ['Total kWh Used', formatKwh(totalKwh)]
+  ];
+  for (const [label, value] of cards) {
+    const item = document.createElement('div');
+    item.className = 'report-metric';
+    const s = document.createElement('span'); s.textContent = label;
+    const v = document.createElement('strong'); v.textContent = value;
+    item.append(s, v);
+    els.solarSummary.append(item);
+  }
+
+  els.solarSummaryRows.replaceChildren();
+  for (const row of report.summary || []) {
+    const tr = document.createElement('tr');
+    // Rate column: rates can differ by season, so show "varies" only if the
+    // period actually spans seasons; otherwise pull the single rate from hours.
+    const rate = soleRateForType(report, row.rateType);
+    appendCells(tr, [row.rateType, formatKwh(row.kwh), rate == null ? 'varies' : `$${rate.toFixed(5)}`, formatCurrency(row.cost)]);
+    els.solarSummaryRows.append(tr);
+  }
+  els.solarSummaryTotal.replaceChildren();
+  const totalTr = document.createElement('tr');
+  totalTr.className = 'totals-row';
+  appendCells(totalTr, ['Total', formatKwh(totalKwh), '', formatCurrency(noSolarCost)]);
+  els.solarSummaryTotal.append(totalTr);
+
+  els.solarHourlyRows.replaceChildren();
+  for (const h of report.hours || []) {
+    const tr = document.createElement('tr');
+    appendCells(tr, [
+      h.date, h.season, h.startTime, h.endTime,
+      formatKwh(h.kwh), h.rateType, `$${Number(h.rate).toFixed(5)}`, formatCurrency(h.cost)
+    ]);
+    els.solarHourlyRows.append(tr);
+  }
+
+  els.solarReportText.value = formatSolarReportText(report, billed, savings);
+}
+
+function soleRateForType(report, rateType) {
+  const rates = new Set();
+  for (const h of report.hours || []) {
+    if (h.rateType === rateType) rates.add(Number(h.rate));
+  }
+  return rates.size === 1 ? [...rates][0] : null;
+}
+
+function formatSolarReportText(report, billed, savings) {
+  const lines = [
+    'Solar Cost Savings Report',
+    `Site: ${report.siteId}`,
+    `Billing period: ${report.startDate} to ${report.endDate}`,
+    `Timezone: ${report.timeZone}`,
+    `Rate plan source: ${report.tariff?.source || 'tesla'}`,
+    '',
+    'WHAT THIS SHOWS',
+    'Your total home usage priced at TOU rates as if you had no solar or',
+    'batteries (every kWh bought from the grid). Compared to what you actually',
+    'paid, the difference estimates your solar + battery savings. Approximate —',
+    'a no-solar account would likely be on a different rate plan, and fixed',
+    'charges / true-up are not included.',
+    '',
+    'SUMMARY (no-solar cost by rate type)',
+    `${padEnd('Rate Type', 12)} ${pad('kWh Used', 10)} ${pad('Cost', 10)}`
+  ];
+  for (const row of report.summary || []) {
+    lines.push(`${padEnd(row.rateType, 12)} ${pad(formatKwh(row.kwh), 10)} ${pad(formatCurrency(row.cost), 10)}`);
+  }
+  lines.push(
+    `${padEnd('TOTAL', 12)} ${pad(formatKwh(report.totals?.kwh ?? 0), 10)} ${pad(formatCurrency(report.totals?.noSolarCost ?? 0), 10)}`,
+    '',
+    `No-solar cost:  ${formatCurrency(report.totals?.noSolarCost ?? 0)}`,
+    `Billed (actual): ${billed == null ? '(enter billed amount)' : formatCurrency(billed)}`,
+    `Solar savings:  ${savings == null ? '—' : formatCurrency(savings)}`,
+    '',
+    'HOURLY DETAIL (CSV)',
+    'Date,Season,Start,End,kWh Used,Rate Type,Rate,Cost'
+  );
+  for (const h of report.hours || []) {
+    lines.push(`${h.date},${h.season},${h.startTime},${h.endTime},${formatKwh(h.kwh)},${h.rateType},${Number(h.rate).toFixed(5)},${Number(h.cost).toFixed(2)}`);
+  }
+  return lines.join('\n');
+}
+
 async function runTouReport() {
   await runWithFeedback({
     buttons: [els.runTouReport],
@@ -792,9 +936,11 @@ function formatTouReportText(report) {
   for (const season of report.tariff?.seasons || []) {
     lines.push(`  ${season.label} (${describeSeasonMonths(season)})`);
     for (const period of season.periods || []) {
-      const w = period.windows?.[0];
-      const window = w ? `${formatMinutesAsTime(w.startMin)}–${formatMinutesAsTime(w.endMin)}` : '—';
-      lines.push(`    ${padEnd(period.name, 14)} ${padEnd(window, 13)}  buy $${Number(period.buyRate || 0).toFixed(5)}/kWh   sell $${Number(period.sellRate || 0).toFixed(5)}/kWh`);
+      const windows = period.windows?.length ? period.windows : [null];
+      for (const w of windows) {
+        const window = w ? `${formatMinutesAsTime(w.startMin)}–${formatMinutesAsTime(w.endMin)}` : '—';
+        lines.push(`    ${padEnd(period.name, 14)} ${padEnd(window, 13)}  buy $${Number(period.buyRate || 0).toFixed(5)}/kWh   sell $${Number(period.sellRate || 0).toFixed(5)}/kWh`);
+      }
     }
   }
   lines.push(
@@ -945,18 +1091,24 @@ function renderRatePlanCard(host, plan, currentDate) {
   for (const season of plan.seasons || []) {
     const isCurrentSeason = matchSeason(season, todayMonth, todayDay);
     const monthsText = describeSeasonMonths(season);
-    for (const [pi, period] of (season.periods || []).entries()) {
+    // Flatten to one row per (period, window) so multi-window periods like a
+    // morning + evening Partial-Peak each show their own hours.
+    const rows = [];
+    for (const period of season.periods || []) {
+      const windows = period.windows?.length ? period.windows : [null];
+      for (const window of windows) rows.push({ period, window });
+    }
+    for (const [ri, { period, window }] of rows.entries()) {
       const tr = document.createElement('tr');
       if (isCurrentSeason) tr.classList.add('current-season');
-      const window = period.windows?.[0];
       const inWindow = window && timeInWindowClient(todayMinutes, window.startMin, window.endMin);
       if (isCurrentSeason && inWindow) tr.classList.add('current-period');
 
       const tdSeason = document.createElement('td');
-      if (pi === 0) tdSeason.textContent = season.label;
+      if (ri === 0) tdSeason.textContent = season.label;
       tr.append(tdSeason);
       const tdMonths = document.createElement('td');
-      if (pi === 0) tdMonths.textContent = monthsText;
+      if (ri === 0) tdMonths.textContent = monthsText;
       tr.append(tdMonths);
       tr.append(tdText(period.name || ''));
       tr.append(tdText(window ? `${formatMinutesAsTime(window.startMin)}–${formatMinutesAsTime(window.endMin)}` : '—'));
@@ -1193,6 +1345,9 @@ function initReportDates() {
   const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
   els.touStartDate.value = dateInputValue(monthStart);
   els.touEndDate.value = dateInputValue(today);
+  // Solar savings has no standard period; default to month-to-date as a starting point.
+  els.solarStartDate.value = dateInputValue(monthStart);
+  els.solarEndDate.value = dateInputValue(today);
 }
 
 function dateInputValue(date) {
@@ -1344,24 +1499,27 @@ async function loadRates() {
 }
 
 function seedFromTesla(teslaPlan) {
-  // Tesla plan has ON_PEAK + OFF_PEAK only. Synthesize a Partial-Peak shell so
-  // the user has a starting point matching what they actually pay.
+  // Start the editable draft from whatever Tesla has on file. Each window
+  // becomes its own editable row (the editor is one-window-per-row), so a
+  // multi-window period like a morning + evening Partial-Peak expands into two.
   if (!teslaPlan?.seasons?.length) return deepClone(DEFAULT_DRAFT);
   return {
     enabled: false,
     seasons: teslaPlan.seasons.map(season => {
       const periods = [];
       for (const p of season.periods || []) {
-        const w = p.windows?.[0];
-        periods.push({
-          name: humanPeriodName(p.name),
-          startTime: minutesToTime(w?.startMin),
-          endTime: minutesToTime(w?.endMin),
-          buyRate: Number(p.buyRate || 0),
-          sellRate: Number(p.sellRate || 0)
-        });
+        const windows = p.windows?.length ? p.windows : [null];
+        for (const w of windows) {
+          periods.push({
+            name: humanPeriodName(p.name),
+            startTime: minutesToTime(w?.startMin),
+            endTime: minutesToTime(w?.endMin),
+            buyRate: Number(p.buyRate || 0),
+            sellRate: Number(p.sellRate || 0)
+          });
+        }
       }
-      // Sort Off-Peak / Partial-Peak / Peak for editing.
+      // Sort Off-Peak / Partial-Peak / Peak for editing (stable within a group).
       periods.sort((a, b) => periodSortKey(a.name) - periodSortKey(b.name));
       return {
         name: season.label,

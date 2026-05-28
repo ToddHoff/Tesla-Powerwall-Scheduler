@@ -458,6 +458,11 @@ button.add-period:hover {
   opacity: 0.6;
 }
 
+.solar-hourly-wrap {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
 .rate-plan-block {
   margin: 10px 0;
 }

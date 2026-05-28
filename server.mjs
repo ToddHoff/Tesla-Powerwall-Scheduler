@@ -48,6 +48,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/live-status' && req.method === 'GET') return await liveStatus(res);
     if (url.pathname === '/api/reports/net-billing' && req.method === 'GET') return await netBillingReport(url, res);
     if (url.pathname === '/api/reports/tou-cost' && req.method === 'GET') return await touCostReport(url, res);
+    if (url.pathname === '/api/reports/solar-savings' && req.method === 'GET') return await solarSavingsReport(url, res);
     if (url.pathname === '/api/rates' && req.method === 'GET') return await ratesGet(res);
     if (url.pathname === '/api/rates' && req.method === 'POST') return await ratesPost(req, res);
     if (url.pathname.startsWith('/api/run/') && req.method === 'POST') return await runManual(url, res);
@@ -628,6 +629,157 @@ async function touCostReport(url, res) {
     days,
     totals
   });
+}
+
+async function solarSavingsReport(url, res) {
+  const config = await readConfig();
+  requireTeslaSetting(config.tesla.energySiteId, 'Energy site ID');
+  const timeZone = url.searchParams.get('timeZone') || config.timezone || 'America/Los_Angeles';
+  const startDate = url.searchParams.get('startDate');
+  const endDate = url.searchParams.get('endDate');
+  if (!isDateOnly(startDate) || !isDateOnly(endDate)) {
+    return sendJson(res, { error: 'startDate and endDate must be YYYY-MM-DD.' }, 400);
+  }
+  if (startDate > endDate) {
+    return sendJson(res, { error: 'startDate must be on or before endDate.' }, 400);
+  }
+  const dates = dateRange(startDate, endDate);
+  if (dates.length > 45) {
+    return sendJson(res, { error: 'Report range is limited to 45 days to control Tesla API usage.' }, 400);
+  }
+
+  const siteInfo = await teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/site_info`);
+  const localSettings = await readJson(SETTINGS_PATH, {});
+  const tariff = buildRatePlan(localSettings, siteInfo);
+  if (!tariff) {
+    return sendJson(res, { error: 'No rate plan available (Tesla tariff_content empty and no custom override set).' }, 502);
+  }
+
+  const hours = [];
+  for (const date of dates) {
+    const params = new URLSearchParams({
+      kind: 'energy', period: 'day',
+      start_date: zonedDateTimeParam(date, '00:00:00', timeZone),
+      end_date:   zonedDateTimeParam(date, '23:59:59', timeZone),
+      time_zone:  timeZone
+    });
+    const raw = await teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/calendar_history?${params}`);
+    const intervals = Array.isArray(raw.response?.time_series) ? raw.response.time_series : [];
+    hours.push(...hourlyHomeUsage({ date, intervals, tariff }));
+  }
+
+  // Per-rate-type summary (Off-Peak / Part-Peak / Peak) + grand total.
+  const byType = {
+    'Off-Peak': { kwh: 0, cost: 0 },
+    'Part-Peak': { kwh: 0, cost: 0 },
+    'Peak': { kwh: 0, cost: 0 }
+  };
+  let totalKwh = 0;
+  let totalCost = 0;
+  for (const h of hours) {
+    const key = byType[h.rateType] ? h.rateType : 'Off-Peak';
+    byType[key].kwh += h.kwh;
+    byType[key].cost += h.cost;
+    totalKwh += h.kwh;
+    totalCost += h.cost;
+  }
+  const summary = Object.entries(byType).map(([rateType, v]) => ({
+    rateType,
+    kwh: round(v.kwh),
+    cost: roundCurrency(v.cost)
+  }));
+
+  await logEvent('info', 'solar_savings_report', {
+    startDate, endDate, timeZone,
+    daysCount: dates.length,
+    totalKwh: round(totalKwh),
+    noSolarCost: roundCurrency(totalCost)
+  });
+
+  return sendJson(res, {
+    startDate, endDate, timeZone,
+    siteId: config.tesla.energySiteId,
+    tariff,
+    hours: hours.map(h => ({ ...h, kwh: round(h.kwh), cost: roundCurrency(h.cost) })),
+    summary,
+    totals: { kwh: round(totalKwh), noSolarCost: roundCurrency(totalCost) }
+  });
+}
+
+function hourlyHomeUsage({ date, intervals, tariff }) {
+  const season = seasonForDate(date, tariff);
+  const seasonName = seasonDisplayName(season, tariff.source);
+  const rateByName = {};
+  for (const period of season.periods || []) {
+    rateByName[period.name] = period.buyRate;
+  }
+
+  // Roll the 5-minute intervals up into clock-hours.
+  const hourMap = new Map();
+  for (const interval of intervals) {
+    const ts = String(interval.timestamp || '');
+    if (ts.length < 13) continue;
+    const hourKey = ts.slice(0, 13); // e.g. "2026-06-01T16"
+    const prev = hourMap.get(hourKey) || { homeWh: 0, weekday: localWeekday(ts) };
+    prev.homeWh += Number(interval.total_home_usage || 0);
+    hourMap.set(hourKey, prev);
+  }
+
+  const out = [];
+  for (const [hourKey, agg] of [...hourMap.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const hourNum = Number(hourKey.slice(11, 13));
+    const periodName = periodForLocalTime(hourNum, 0, agg.weekday, season);
+    const rate = Number(rateByName[periodName] || 0);
+    const kwh = whToKwh(agg.homeWh);
+    out.push({
+      date,
+      season: seasonName,
+      startTime: formatHour12(hourNum),
+      endTime: formatHour12(hourNum + 1),
+      kwh,
+      rateType: displayRateType(periodName),
+      rate,
+      cost: kwh * rate
+    });
+  }
+  return out;
+}
+
+function seasonDisplayName(season, source) {
+  // Custom plans use the user's own season names. Tesla's labels are inverted
+  // from PG&E convention (it files Jun–Sep under "Winter"), so derive the label
+  // from the months: a season covering July is Summer, otherwise Winter.
+  if (source === 'custom') return season.label;
+  const months = monthsInSeason(season);
+  return months.includes(7) ? 'Summer' : 'Winter';
+}
+
+function monthsInSeason(season) {
+  const from = Number(season.fromMonth ?? season.startMonth ?? 1);
+  const to = Number(season.toMonth ?? from);
+  const out = [];
+  let m = from;
+  for (let i = 0; i < 12; i++) {
+    out.push(m);
+    if (m === to) break;
+    m = m === 12 ? 1 : m + 1;
+  }
+  return out;
+}
+
+function displayRateType(periodName) {
+  if (isOffPeakName(periodName)) return 'Off-Peak';
+  if (isPartialPeakName(periodName)) return 'Part-Peak';
+  if (isPeakName(periodName)) return 'Peak';
+  return periodName;
+}
+
+function formatHour12(hourNum) {
+  const h = ((hourNum % 24) + 24) % 24;
+  const ampm = h < 12 ? 'AM' : 'PM';
+  let h12 = h % 12;
+  if (h12 === 0) h12 = 12;
+  return `${h12}:00:00 ${ampm}`;
 }
 
 // --- Rate plan abstraction -------------------------------------------------

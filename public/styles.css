@@ -520,36 +520,29 @@ button.add-period:hover {
   color: rgb(220, 160, 90);
 }
 
-.scheduler-status {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin: 0 0 12px;
-  padding: 8px 10px;
-  border: 1px solid var(--muted);
-  border-radius: 6px;
+.scheduler-jobs-table {
+  width: 100%;
+  border-collapse: collapse;
   font-size: 13px;
+  margin: 6px 0;
 }
 
-.scheduler-status details {
-  flex-basis: 100%;
+.scheduler-jobs-table th, .scheduler-jobs-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
 }
 
-.scheduler-status pre {
-  margin: 6px 0 0;
+.scheduler-jobs-table th {
+  color: var(--muted);
+  font-weight: 600;
   font-size: 12px;
-  max-height: 160px;
-  overflow: auto;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
-.scheduler-status .ok {
-  color: rgb(110, 200, 130);
-}
-
-.scheduler-status .warn {
-  color: rgb(220, 160, 90);
-}
+#schedulerStatusLine.ok { color: rgb(110, 200, 130); }
+#schedulerStatusLine.warn { color: rgb(220, 160, 90); }
 
 .link-button {
   background: transparent;

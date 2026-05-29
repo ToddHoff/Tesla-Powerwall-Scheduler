@@ -66,6 +66,8 @@ const els = {
   schedulerStatusLine: document.querySelector('#schedulerStatusLine'),
   schedulerStatusRefresh: document.querySelector('#schedulerStatusRefresh'),
   schedulerStatusRaw: document.querySelector('#schedulerStatusRaw'),
+  schedulerJobsHead: document.querySelector('#schedulerJobsHead'),
+  schedulerJobsBody: document.querySelector('#schedulerJobsBody'),
   copyShareText: document.querySelector('#copyShareText'),
   shareText: document.querySelector('#shareText'),
   shareStatus: document.querySelector('#shareStatus'),
@@ -296,10 +298,35 @@ function renderSchedulerStatus(result) {
     els.schedulerStatusLine.textContent = `${backend}: no jobs installed.`;
     els.schedulerStatusLine.className = 'warn';
   } else {
-    const times = jobs.map(j => j.time).join(', ');
-    els.schedulerStatusLine.textContent = `✓ ${backend}: ${jobs.length} job${jobs.length === 1 ? '' : 's'} installed (${times}).`;
+    els.schedulerStatusLine.textContent = `✓ ${backend}: ${jobs.length} job${jobs.length === 1 ? '' : 's'} installed.`;
     els.schedulerStatusLine.className = 'ok';
   }
+
+  // Per-backend column set so each row shows everything we know about it.
+  const columns = backend === 'launchd'
+    ? [['Time', 'time'], ['Label', 'label'], ['PID', 'pid'], ['Last exit', 'lastExit']]
+    : [['Time', 'time'], ['Step ID', 'id'], ['Cron schedule', 'schedule']];
+
+  els.schedulerJobsHead.replaceChildren();
+  const headRow = document.createElement('tr');
+  for (const [label] of columns) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    headRow.append(th);
+  }
+  els.schedulerJobsHead.append(headRow);
+
+  els.schedulerJobsBody.replaceChildren();
+  for (const job of jobs) {
+    const tr = document.createElement('tr');
+    for (const [, key] of columns) {
+      const td = document.createElement('td');
+      td.textContent = job[key] != null ? String(job[key]) : '—';
+      tr.append(td);
+    }
+    els.schedulerJobsBody.append(tr);
+  }
+
   els.schedulerStatusRaw.textContent = result?.raw || '(no raw output)';
 }
 
@@ -498,7 +525,10 @@ function setView(view) {
   els.ratesView.classList.toggle('hidden', selected !== 'rates');
   els.configureView.classList.toggle('hidden', selected !== 'configure');
   els.activityView.classList.toggle('hidden', selected !== 'activity');
-  if (selected === 'settings' && !settingsFetched) refreshSettings();
+  if (selected === 'settings') {
+    if (!settingsFetched) refreshSettings();
+    refreshSchedulerStatus();
+  }
   if (selected === 'rates' && !ratesFetched) loadRates();
   if (selected === 'configure' && !configFetched) loadConfigure();
 }

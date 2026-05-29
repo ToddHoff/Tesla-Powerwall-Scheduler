@@ -6,7 +6,7 @@
 set -euo pipefail
 
 APP_DIR="${0:A:h:h}"
-LABEL="com.toddhoff.tesla-scheduler"
+LABEL="powerwall-scheduler"
 PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 PORT="${PORT:-8787}"
 DOMAIN="gui/$(id -u)"
@@ -29,8 +29,11 @@ launchctl kickstart -k "${DOMAIN}/${LABEL}"
 
 for _ in {1..20}; do
   sleep 0.25
-  if curl -sf "http://localhost:${PORT}/api/status" >/dev/null 2>&1; then
-    echo "Server up at http://localhost:${PORT}"
+  # Any HTTP response means the server is up. 401 counts (auth is enabled) —
+  # don't use curl -f, which would treat 401 as a failure.
+  code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${PORT}/api/status" 2>/dev/null || true)"
+  if [[ "${code}" != "000" && -n "${code}" ]]; then
+    echo "Server up at http://localhost:${PORT} (status ${code})"
     exit 0
   fi
 done

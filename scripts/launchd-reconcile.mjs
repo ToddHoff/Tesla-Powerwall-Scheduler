@@ -8,8 +8,11 @@ import os from 'node:os';
 const execFileAsync = promisify(execFile);
 
 const LAUNCH_AGENTS_DIR = path.join(os.homedir(), 'Library', 'LaunchAgents');
-const LABEL_PREFIX = 'com.toddhoff.tesla.';
-const LEGACY_LABEL = 'com.toddhoff.tesla-run-due';
+const LABEL_PREFIX = 'powerwall-scheduler.step.';
+// Old labels we sweep away on reconcile so upgraders don't keep orphaned jobs:
+// the original every-5-min cron, and the previous personalized per-step prefix.
+const LEGACY_LABELS = ['com.toddhoff.tesla-run-due'];
+const LEGACY_STEP_PREFIXES = ['com.toddhoff.tesla.'];
 
 // Fire each step one minute past its scheduled time so the clock has clearly
 // crossed the boundary by the time the script POSTs. The verify loop adds its
@@ -36,7 +39,7 @@ export async function reconcileLaunchd({ schedule, appDir, nodeBin, logDir }) {
   const result = { added: [], updated: [], removed: [], unchanged: [] };
 
   for (const file of existing) {
-    if (file.label === LEGACY_LABEL || !desired.has(file.label)) {
+    if (!desired.has(file.label)) {
       await unloadAndDelete(file);
       result.removed.push(file.label);
     }
@@ -59,10 +62,15 @@ export async function reconcileLaunchd({ schedule, appDir, nodeBin, logDir }) {
 }
 
 export async function removeLegacyPlist() {
-  const plistPath = path.join(LAUNCH_AGENTS_DIR, `${LEGACY_LABEL}.plist`);
-  if (!existsSync(plistPath)) return false;
-  await unloadAndDelete({ label: LEGACY_LABEL, plistPath });
-  return true;
+  let removedAny = false;
+  for (const label of LEGACY_LABELS) {
+    const plistPath = path.join(LAUNCH_AGENTS_DIR, `${label}.plist`);
+    if (existsSync(plistPath)) {
+      await unloadAndDelete({ label, plistPath });
+      removedAny = true;
+    }
+  }
+  return removedAny;
 }
 
 function labelForStep(step) {
@@ -131,9 +139,13 @@ function escapeXml(value) {
 async function listExistingPlists() {
   if (!existsSync(LAUNCH_AGENTS_DIR)) return [];
   const entries = await readdir(LAUNCH_AGENTS_DIR);
-  const matches = entries.filter(name =>
-    (name.startsWith(LABEL_PREFIX) || name === `${LEGACY_LABEL}.plist`) && name.endsWith('.plist')
-  );
+  const matches = entries.filter(name => {
+    if (!name.endsWith('.plist')) return false;
+    if (name.startsWith(LABEL_PREFIX)) return true;
+    if (LEGACY_STEP_PREFIXES.some(prefix => name.startsWith(prefix))) return true;
+    if (LEGACY_LABELS.some(label => name === `${label}.plist`)) return true;
+    return false;
+  });
   const out = [];
   for (const name of matches) {
     const plistPath = path.join(LAUNCH_AGENTS_DIR, name);

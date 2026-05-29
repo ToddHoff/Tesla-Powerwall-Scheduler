@@ -10,6 +10,8 @@ let ratesFetched = false;
 let ratesDraft = null;       // current editable draft
 let ratesTeslaFallback = null;
 let lastSolarReport = null;
+let configFetched = false;
+let configData = null;
 
 const els = {
   viewButtons: [...document.querySelectorAll('.app-tabs button')],
@@ -18,7 +20,17 @@ const els = {
   touCostView: document.querySelector('#touCostView'),
   settingsView: document.querySelector('#settingsView'),
   ratesView: document.querySelector('#ratesView'),
+  configureView: document.querySelector('#configureView'),
   activityView: document.querySelector('#activityView'),
+  configSave: document.querySelector('#configSave'),
+  configStatus: document.querySelector('#configStatus'),
+  configActiveTag: document.querySelector('#configActiveTag'),
+  configAccessNote: document.querySelector('#configAccessNote'),
+  configPassword: document.querySelector('#configPassword'),
+  configClearPassword: document.querySelector('#configClearPassword'),
+  configPasswordState: document.querySelector('#configPasswordState'),
+  configPort: document.querySelector('#configPort'),
+  configTimezone: document.querySelector('#configTimezone'),
   ratesEnabled: document.querySelector('#ratesEnabled'),
   ratesSave: document.querySelector('#ratesSave'),
   ratesStatus: document.querySelector('#ratesStatus'),
@@ -430,9 +442,11 @@ function setView(view) {
   els.solarSavingsView.classList.toggle('hidden', selected !== 'solar-savings');
   els.settingsView.classList.toggle('hidden', selected !== 'settings');
   els.ratesView.classList.toggle('hidden', selected !== 'rates');
+  els.configureView.classList.toggle('hidden', selected !== 'configure');
   els.activityView.classList.toggle('hidden', selected !== 'activity');
   if (selected === 'settings' && !settingsFetched) refreshSettings();
   if (selected === 'rates' && !ratesFetched) loadRates();
+  if (selected === 'configure' && !configFetched) loadConfigure();
 }
 
 function render() {
@@ -1842,6 +1856,135 @@ els.ratesEnabled.addEventListener('change', () => {
     ? 'Custom rates in use'
     : `Tesla data in use${ratesTeslaFallback?.code ? ` (${ratesTeslaFallback.code})` : ''}`;
 });
+
+// ---- Configure tab ---------------------------------------------------------
+
+async function loadConfigure() {
+  try {
+    configData = await api('/api/server-config');
+    configFetched = true;
+    renderConfigure();
+  } catch (error) {
+    setStatus(els.configStatus, error.message, 'error');
+  }
+}
+
+function renderConfigure() {
+  const c = configData || {};
+  for (const radio of document.querySelectorAll('input[name="accessMode"]')) {
+    radio.checked = radio.value === (c.accessMode || 'localhost');
+  }
+  els.configPort.value = c.port || 8787;
+  els.configTimezone.value = c.timezone || 'America/Los_Angeles';
+  els.configPasswordState.textContent = c.hasPassword
+    ? 'A password is currently set. Leave blank to keep it.'
+    : 'No password set.';
+  els.configActiveTag.textContent = `Now serving: ${c.activeAccessMode} on port ${c.activePort}`;
+  // If saved mode was public but downgraded for missing password, flag it.
+  if (c.accessMode === 'public' && c.activeAccessMode !== 'public') {
+    els.configActiveTag.textContent += ' (public downgraded — set a password)';
+  }
+  updateAccessNote();
+}
+
+function selectedAccessMode() {
+  const checked = document.querySelector('input[name="accessMode"]:checked');
+  return checked ? checked.value : 'localhost';
+}
+
+function updateAccessNote() {
+  const mode = selectedAccessMode();
+  const lanIp = configData?.lanIp;
+  const port = Number(els.configPort.value) || 8787;
+  const note = els.configAccessNote;
+  note.classList.remove('warn');
+  if (mode === 'localhost') {
+    note.textContent = `Reachable only on this Mac at http://localhost:${port}.`;
+  } else if (mode === 'lan') {
+    note.textContent = lanIp
+      ? `Reachable on your network at http://${lanIp}:${port} (and http://localhost:${port}). Set a password if other people share this network.`
+      : `Reachable on your local network on port ${port}. Set a password if other people share this network.`;
+  } else {
+    note.classList.add('warn');
+    note.textContent = 'Public binds to all interfaces but does NOT open your router — you must put it behind an HTTPS tunnel (Tailscale, Cloudflare Tunnel, or ngrok) or a reverse proxy. A password is required. Never port-forward plain HTTP; the password would travel unencrypted.';
+  }
+}
+
+for (const radio of document.querySelectorAll('input[name="accessMode"]')) {
+  radio.addEventListener('change', updateAccessNote);
+}
+els.configPort.addEventListener('input', updateAccessNote);
+
+els.configSave.addEventListener('click', async () => {
+  const mode = selectedAccessMode();
+  const password = els.configPassword.value;
+  const clearPassword = els.configClearPassword.checked;
+  if (mode === 'public' && !password && !configData?.hasPassword) {
+    setStatus(els.configStatus, 'Public access requires a password. Set one first.', 'error');
+    return;
+  }
+  if (mode === 'public' && clearPassword && !password) {
+    setStatus(els.configStatus, 'Cannot remove the password while Public is selected.', 'error');
+    return;
+  }
+  await runWithFeedback({
+    buttons: [els.configSave],
+    pendingText: 'Saving...',
+    successText: 'Save & Restart',
+    statusEl: els.configStatus,
+    pendingMessage: 'Saving configuration...',
+    successMessage: '',
+    task: async () => {
+      const payload = {
+        accessMode: mode,
+        port: Number(els.configPort.value) || 8787,
+        timezone: els.configTimezone.value.trim() || undefined
+      };
+      if (clearPassword) payload.clearPassword = true;
+      else if (password) payload.password = password;
+
+      const result = await api('/api/server-config', { method: 'POST', body: payload });
+      if (!result.ok) throw new Error(result.error || 'Save failed.');
+
+      els.configPassword.value = '';
+      els.configClearPassword.checked = false;
+
+      if (!result.restartNeeded) {
+        setStatus(els.configStatus, 'Saved. No restart needed.', 'success');
+        await loadConfigure();
+        return;
+      }
+
+      // Work out the URL we'll likely need after restart.
+      const newPort = result.port;
+      const host = window.location.hostname;
+      const target = `${window.location.protocol}//${host}:${newPort}`;
+      setStatus(els.configStatus, `Saved. Restarting server on ${mode} / port ${newPort}... reconnecting to ${target}`, 'pending');
+
+      // Fire the restart (server exits; launchd respawns). Then poll until it's back.
+      await api('/api/restart', { method: 'POST' }).catch(() => {});
+      await waitForServerBack(target);
+    }
+  });
+});
+
+async function waitForServerBack(targetUrl) {
+  // Poll the status endpoint until the respawned server answers, then reload.
+  for (let i = 0; i < 40; i += 1) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const res = await fetch(`${targetUrl}/api/status`, { method: 'GET' });
+      if (res.ok || res.status === 401) {
+        // 401 means it's up and now password-protected — reload to trigger the prompt.
+        window.location.href = targetUrl;
+        return;
+      }
+    } catch {
+      // not back yet
+    }
+  }
+  setStatus(els.configStatus, `Server is restarting. If this page doesn't reconnect, open ${targetUrl} manually.`, 'pending');
+}
 
 els.ratesSave.addEventListener('click', async () => {
   await runWithFeedback({

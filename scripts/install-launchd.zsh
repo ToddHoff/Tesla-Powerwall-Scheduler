@@ -1,11 +1,21 @@
 #!/bin/zsh
 set -euo pipefail
 
-APP_DIR="${HOME}/tesla"
-PLIST="${HOME}/Library/LaunchAgents/com.toddhoff.tesla-scheduler.plist"
+# Repo root = parent of this script's directory, so the agent works regardless
+# of where the project is cloned.
+APP_DIR="${0:A:h:h}"
+LABEL="powerwall-scheduler"
+PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 NODE_PATH="$(command -v node)"
 
 mkdir -p "${HOME}/Library/LaunchAgents" "${APP_DIR}/logs"
+
+# Migrate: remove the previous personalized server agent if it exists.
+OLD_PLIST="${HOME}/Library/LaunchAgents/com.toddhoff.tesla-scheduler.plist"
+if [[ -e "${OLD_PLIST}" ]]; then
+  launchctl unload "${OLD_PLIST}" 2>/dev/null || true
+  rm -f "${OLD_PLIST}"
+fi
 
 cat > "${PLIST}" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -13,7 +23,7 @@ cat > "${PLIST}" <<PLIST
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.toddhoff.tesla-scheduler</string>
+  <string>${LABEL}</string>
   <key>WorkingDirectory</key>
   <string>${APP_DIR}</string>
   <key>ProgramArguments</key>
@@ -35,7 +45,7 @@ PLIST
 
 launchctl unload "${PLIST}" 2>/dev/null || true
 launchctl load "${PLIST}"
-launchctl start com.toddhoff.tesla-scheduler
+launchctl start "${LABEL}"
 
-echo "Installed and started com.toddhoff.tesla-scheduler"
+echo "Installed and started ${LABEL}"
 echo "Open http://localhost:8787"

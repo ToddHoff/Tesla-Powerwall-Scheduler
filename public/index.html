@@ -38,6 +38,7 @@
         <button data-view="solar-savings">Solar Savings</button>
         <button data-view="settings">Settings</button>
         <button data-view="rates">Rates</button>
+        <button data-view="configure">Configure</button>
         <button data-view="activity">Activity</button>
       </nav>
 
@@ -470,6 +471,73 @@
         <div id="ratesValidation" class="muted-meta"></div>
 
         <div id="ratesSeasons" class="rates-seasons"></div>
+      </section>
+
+      <section id="configureView" class="view-panel panel hidden">
+        <div class="section-head">
+          <div>
+            <h2>Configure</h2>
+            <p>Who can reach this web app, and the password that protects it.</p>
+          </div>
+          <div class="row-actions">
+            <span id="configActiveTag" class="muted-meta"></span>
+            <button id="configSave" class="primary">Save &amp; Restart</button>
+          </div>
+        </div>
+
+        <div id="configStatus" class="operation-status" aria-live="polite"></div>
+
+        <h3 class="settings-subhead">Access</h3>
+        <div class="config-modes">
+          <label class="config-mode">
+            <input type="radio" name="accessMode" value="localhost" />
+            <div>
+              <strong>Localhost only</strong>
+              <span class="muted-meta">This Mac only (127.0.0.1). Most secure. No password needed.</span>
+            </div>
+          </label>
+          <label class="config-mode">
+            <input type="radio" name="accessMode" value="lan" />
+            <div>
+              <strong>Local network</strong>
+              <span class="muted-meta">Devices on your Wi‑Fi/LAN. Password recommended. Best paired with Tailscale for remote access.</span>
+            </div>
+          </label>
+          <label class="config-mode">
+            <input type="radio" name="accessMode" value="public" />
+            <div>
+              <strong>Public (advanced)</strong>
+              <span class="muted-meta">Binds to all interfaces for use behind a tunnel/reverse proxy. Password required. See the warning below.</span>
+            </div>
+          </label>
+        </div>
+
+        <div id="configAccessNote" class="config-note muted-meta"></div>
+
+        <h3 class="settings-subhead">Password</h3>
+        <div class="config-grid">
+          <label>
+            New password
+            <input id="configPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep current" />
+          </label>
+          <label class="config-checkbox">
+            <input id="configClearPassword" type="checkbox" />
+            <span>Remove password</span>
+          </label>
+          <div id="configPasswordState" class="muted-meta"></div>
+        </div>
+
+        <h3 class="settings-subhead">Server</h3>
+        <div class="config-grid">
+          <label>
+            Port
+            <input id="configPort" type="number" min="1024" max="65535" />
+          </label>
+          <label>
+            Timezone
+            <input id="configTimezone" spellcheck="false" />
+          </label>
+        </div>
       </section>
 
       <section id="activityView" class="view-panel panel log-panel hidden">

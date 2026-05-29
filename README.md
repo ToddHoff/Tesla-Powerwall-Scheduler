@@ -1,200 +1,332 @@
 # Tesla Powerwall Scheduler
 
-A local web app and scheduler for applying an active Powerwall automation schedule through Tesla's Fleet API.
+A local web app (macOS) that automates your Powerwall settings through Tesla's
+Fleet API. You define a daily schedule — backup reserve, operating mode, energy
+exports, and grid charging — and the app applies it at the right times, **reads
+the setting back to confirm it actually took**, and retries if it didn't.
 
-## What It Does
+It also reports on what your schedule is doing for your electric bill: time‑of‑use
+cost breakdowns, a peak‑window audit, and a solar‑savings estimate against your
+actual PG&E bill.
 
-- Runs a local web app at `http://localhost:8787`
-- Stores your schedule in `config/schedule.json`
-- Uses Tesla OAuth to get an access/refresh token
-- Applies Powerwall settings at the configured times
-- Keeps recent activity in `logs/scheduler.log`
-- Can run as a macOS LaunchAgent so it starts when you log in
+> **Heads up:** This software changes the **backup reserve** on your home
+> battery — the energy held back for outages. You are responsible for keeping
+> that reserve aligned with your own risk tolerance. See **Disclaimer** below.
 
-This replaces the NetZero-style scheduled changes for backup reserve, operational mode, energy exports, and grid charging.
+---
 
-## Quick Start
+## Features
 
-```bash
-cd ~/tesla
-cp .env.example .env
-npm run check
-npm start
-```
+- **Schedules** — multiple named schedules (e.g. Summer / Winter); one is active.
+  Each row sets backup reserve %, operating mode (Self‑Powered / Time‑Based
+  Control), energy exports, and grid charging at a specific time of day.
+- **Apply + verify** — when a scheduled time hits, the app POSTs the settings,
+  waits for the gateway to settle, reads `site_info` back, and retries the
+  fields that didn't apply. No more silent "it said 200 but nothing changed."
+- **Net Billing** report — grid import/export/net kWh by day and time window.
+- **TOU Cost** report — your grid usage priced against your time‑of‑use rate
+  plan, with a peak‑window audit (did the battery carry the 4–9 PM peak?).
+- **Solar Savings** report — prices your *total home usage* as if you had no
+  solar/battery, subtracts what you actually paid, and estimates your savings.
+  Exports to CSV for Google Sheets.
+- **Settings** — live gateway state and the rate schedule Tesla has on file.
+- **Rates** — optionally override the rate plan when Tesla's data is incomplete.
+- **Configure** — choose who can reach the app (localhost / LAN / public),
+  set a password, port, and timezone.
+- **Activity** — merged, filterable log of every scheduled run and server event.
 
-Open `http://localhost:8787`.
+---
 
-## Tesla Setup
+## Requirements
 
-1. Create or sign in to a Tesla developer account at `https://developer.tesla.com`.
-2. Create a Fleet API application.
-3. Request these OAuth scopes:
+- **macOS** (uses `launchd` for scheduling and an always‑on server).
+- **Node.js 20+** (`node --version`).
+- A **Powerwall** (or Solar + Powerwall) on your Tesla account.
+- A **domain you control with HTTPS** — Tesla's Fleet API requires you to host a
+  public key at a well‑known URL on your own domain. (A static host like GitHub
+  Pages, Netlify, or an S3 bucket behind CloudFront works; it just needs HTTPS.)
 
-   ```text
+This is a personal, single‑household tool. It is not a hosted service.
+
+---
+
+## Part 1 — Tesla Fleet API setup (the involved part)
+
+Tesla's Fleet API requires you to register as a third‑party developer and prove
+control of a domain. Budget 30–60 minutes the first time.
+
+### 1. Create a developer app
+
+1. Sign in at <https://developer.tesla.com> and create an application.
+2. Request these OAuth scopes:
+   ```
    openid offline_access energy_device_data energy_cmds
    ```
-
-4. Generate a Tesla public/private key pair:
-
-   ```bash
-   cd ~/tesla
-   openssl ecparam -name prime256v1 -genkey -noout -out private-key.pem
-   openssl ec -in private-key.pem -pubout -out public-key.pem
+3. Note your **Client ID** and **Client Secret**.
+4. Add this **Allowed Redirect URI**:
    ```
-
-5. Host `public-key.pem` on the domain you used in the Tesla developer portal at this exact URL:
-
-   ```text
-   https://YOUR_DOMAIN/.well-known/appspecific/com.tesla.3p.public-key.pem
-   ```
-
-   Keep `private-key.pem` private. Do not upload it.
-
-6. Add this redirect URI to the Tesla app:
-
-   ```text
    http://localhost:8787/auth/callback
    ```
+   If Tesla's portal rejects a non‑HTTPS redirect URI, use an HTTPS tunnel
+   (see *Tailscale* / Cloudflare Tunnel / ngrok below) and register that
+   callback URL instead — then put the same URL in the app's connection
+   settings.
 
-   If Tesla's portal requires a public HTTPS redirect URI, use a temporary HTTPS tunnel such as Cloudflare Tunnel or ngrok and put that callback URL in both the Tesla app and this app's settings.
+### 2. Generate your key pair
 
-7. Put your Tesla application values in `.env`:
-
-   ```text
-   TESLA_CLIENT_ID=...
-   TESLA_CLIENT_SECRET=...
-   TESLA_APP_DOMAIN=your-domain.com
-   ```
-
-8. Register the app with Tesla after the public key URL is live:
-
-   ```bash
-   cd ~/tesla
-   npm run register
-   ```
-
-   Run registration once for each region you need by passing `--region na`, `--region eu`, or `--region cn`.
-
-9. Start this app and press **Connect Tesla**.
-10. Press **Discover Sites** and select your Powerwall energy site.
-11. Use **Dry Run** on a row first. Then use **Run Now** once you are comfortable with the payloads.
-
-## Current Schedule
-
-The default Summer schedule is already loaded:
-
-| Time | Backup Reserve | Mode | Energy Exports | Grid Charging |
-|---|---:|---|---|---|
-| 7:00 AM | 30% | Self-Powered | Solar Only | Disabled |
-| 3:00 PM | 30% | Time-Based Control | Solar Only | Disabled |
-| 4:00 PM | 30% | Time-Based Control | Solar Only | Disabled |
-| 9:05 PM | 30% | Time-Based Control | Solar Only | Disabled |
-| 12:00 AM | 50% | Time-Based Control | Solar Only | Enabled |
-
-## Summer And Winter Schedules
-
-The UI stores multiple schedules in `config/schedule.json` under `schedules`, with one active schedule selected by `activeScheduleId`.
-
-- **Summer** is active by default.
-- **Winter** is included as a starter schedule.
-- Press **Activate** on a schedule in the UI to make it the one used by Lingon, `npm run due`, and the local runner.
-
-Only the active schedule runs automatically. There is no month filtering; switch schedules when you want the seasonal behavior to change. You can still view, edit, dry-run, and save either schedule from the local UI.
-
-## Run In The Background
-
-### Lingon, Cron, Or Launchd At Specific Times
-
-Use this command when an external scheduler wakes up at a specific time and should run only whatever is due right then:
+From the repo directory:
 
 ```bash
-cd ~/tesla
-npm run due
+openssl ecparam -name prime256v1 -genkey -noout -out private-key.pem
+openssl ec -in private-key.pem -pubout -out public-key.pem
 ```
 
-Or call the wrapper directly:
+- **Keep `private-key.pem` secret.** It is gitignored and must never be committed.
+- You'll host `public-key.pem` publicly in the next step.
+
+### 3. Host the public key on your domain
+
+Tesla checks for the public key at this exact path on the domain you registered:
+
+```
+https://YOUR_DOMAIN/.well-known/appspecific/com.tesla.3p.public-key.pem
+```
+
+Upload `public-key.pem` to that URL. Confirm it loads in a browser before
+continuing.
+
+### 4. Register your partner account
+
+Put your values in `.env` (copy the template first):
 
 ```bash
-/Users/toddhoff/tesla/scripts/run-due.zsh
+cp .env.example .env
 ```
 
-That command starts, reads the current local time, runs any matching schedule row, writes `config/run-state.json` and `logs/scheduler.log`, then exits. It does not keep a timer running.
+```
+TESLA_CLIENT_ID=your-client-id
+TESLA_CLIENT_SECRET=your-client-secret
+TESLA_APP_DOMAIN=your-domain.com
+TESLA_REGION=na          # na | eu | cn
+```
 
-The command has a 3-minute lateness window by default. For example, if Lingon starts it at `7:02 AM`, it can still run the `7:00 AM` row. To change that:
+Then register (run once per region you use):
 
 ```bash
-cd ~/tesla
-npm run due -- --window-minutes 5
+npm run register             # uses TESLA_REGION
+npm run register -- --region na
 ```
 
-Useful test commands:
+A successful run prints your partner account and confirms Tesla can read your
+hosted public key.
+
+---
+
+## Part 2 — Run the app
 
 ```bash
-cd ~/tesla
-npm run due -- --dry-run --at 07:00 --force
-npm run due -- --dry-run --at 00:00 --force
+npm install        # no third-party deps today, but safe to run
+npm run check      # syntax-checks the source
+npm start          # starts the server on http://localhost:8787
 ```
 
-Use one Lingon job for each schedule time:
+Open <http://localhost:8787> and:
 
-```text
-7:00 AM   /Users/toddhoff/tesla/scripts/run-due.zsh
-3:00 PM   /Users/toddhoff/tesla/scripts/run-due.zsh
-4:00 PM   /Users/toddhoff/tesla/scripts/run-due.zsh
-9:05 PM   /Users/toddhoff/tesla/scripts/run-due.zsh
-12:00 AM  /Users/toddhoff/tesla/scripts/run-due.zsh
-```
+1. **Connect Tesla** — completes the OAuth login and stores your tokens locally
+   in `config/tokens.json` (gitignored).
+2. **Discover Sites** — finds your energy site and saves its ID.
+3. On a schedule row, click **Dry Run** to see the exact payloads, then **Run
+   Now** once you're comfortable.
 
-If Lingon lets you specify the executable and arguments separately, use:
+---
 
-```text
-Executable: /Users/toddhoff/tesla/scripts/run-due.zsh
-Arguments:
-Working directory: /Users/toddhoff/tesla
-```
+## Using it
 
-### Always-On Local Server
+### Schedules
 
-To install the macOS LaunchAgent:
+Each row applies four settings at its time:
+
+| Field | Options | Meaning |
+|---|---|---|
+| Backup Reserve | 0–100% | Energy held back for outages; the battery won't discharge below this. |
+| Operating Mode | Self‑Powered / Time‑Based Control | *Self‑Powered* always serves load from the battery. *Time‑Based Control* lets Tesla cost‑optimize against your rate plan (it may pull cheap grid power instead of discharging). |
+| Energy Exports | Solar Only / Everything / None | What may be exported to the grid. |
+| Grid Charging | On / Off | Whether the battery may charge from the grid. |
+
+Multiple schedules (e.g. Summer/Winter) live under one config; **Activate** the
+one you want. Only the active schedule runs. Switch seasons manually.
+
+When you **Save**, the app installs one `launchd` job per enabled row (fired one
+minute past the row's time) and removes jobs for rows you deleted. The save
+status shows what changed (`+1 added, ~1 updated, -1 removed`).
+
+### How scheduled runs work
+
+Each per‑time `launchd` job runs `scripts/run-due.mjs --step <id>`, which:
+
+1. POSTs the row's backup / operation / grid‑import‑export settings.
+2. Waits ~45 s for the gateway to settle.
+3. Reads `site_info` back and compares all four fields.
+4. Re‑POSTs only the fields that didn't match, waits, re‑checks — up to 3 tries.
+5. Logs `step_verified` on success or `verify_failed` (with the mismatched
+   fields) on exhaustion.
+
+Each job writes to its own log: `logs/run-<HHMM>.log`. The **Activity** tab
+merges these with server events and lets you filter by source.
+
+### Reports
+
+- **Net Billing** — kWh in/out/net by day and time bucket.
+- **TOU Cost** — grid usage priced at your TOU rates; flags any day with
+  peak‑hour grid imports and shows battery state of charge across the peak.
+- **Solar Savings** — total home usage priced as if grid‑only (no solar/battery)
+  minus your actual bill = estimated savings. Enter your billing period and the
+  amount billed. **Download CSV** for Google Sheets.
+
+### Rate plan (Settings + Rates)
+
+The app prices reports using the rate plan Tesla has on file (visible in
+**Settings**). If that plan is missing periods (e.g. partial‑peak windows your
+utility actually has), open **Rates**, enable **Use custom rates**, and define
+seasons and periods yourself. Custom rates override Tesla's for report math
+only — they don't change what the Powerwall does.
+
+---
+
+## Run in the background
+
+Install the always‑on server as a `launchd` agent so it starts at login and
+restarts itself if it crashes or after the Mac wakes:
 
 ```bash
-cd ~/tesla
 zsh scripts/install-launchd.zsh
 ```
 
-To uninstall it:
+Restart it after a code change:
 
 ```bash
-cd ~/tesla
+zsh scripts/restart.zsh
+```
+
+Uninstall it (and its scheduled jobs):
+
+```bash
 zsh scripts/uninstall-launchd.zsh
 ```
 
-The computer must be awake and online when a scheduled change is due. The LaunchAgent keeps the scheduler process alive after login, but it does not force a sleeping Mac to wake.
+The Mac must be awake and online when a scheduled change is due. `launchd`'s
+calendar jobs will wake the Mac to fire them, but if the Mac is fully shut down
+a scheduled change is missed.
 
-## Tesla API Notes
+---
 
-This app uses Tesla Fleet API energy endpoints:
+## Access & security (Configure tab)
+
+By default the server binds to **localhost** — reachable only from the Mac it
+runs on, no password. The **Configure** tab lets you change that:
+
+| Mode | Binds to | Reachable by | Password |
+|---|---|---|---|
+| **Localhost** (default) | `127.0.0.1` | this Mac only | not needed |
+| **Local network** | `0.0.0.0` | devices on your Wi‑Fi/LAN | recommended |
+| **Public** | `0.0.0.0` | beyond your network *via a tunnel you run* | **required** |
+
+- A password (stored salted+hashed; checked via HTTP Basic Auth) protects every
+  request when set.
+- **"Public" only changes the bind** — it does not open your router. You must
+  put the app behind an HTTPS tunnel or reverse proxy. **Never port‑forward
+  plain HTTP**; the Basic Auth password would travel unencrypted.
+- Changing access mode / port restarts the server (the LaunchAgent respawns it).
+
+### Recommended: remote access with Tailscale
+
+For getting to the app while away (e.g. on vacation), **don't expose it to the
+public internet.** Use [Tailscale](https://tailscale.com) — a private mesh VPN.
+Your devices join a private network; nothing is published publicly.
+
+1. **Install on the Mac** (the one running the scheduler):
+   ```bash
+   brew install --cask tailscale
+   ```
+   Launch Tailscale and sign in. (Or use the Mac App Store version.)
+2. **Install Tailscale on your phone/laptop** and sign in to the **same account**.
+3. **Find the Mac's Tailscale address:**
+   ```bash
+   /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4
+   ```
+   It looks like `100.x.y.z`. (Or use the MagicDNS name shown in the Tailscale
+   admin console, e.g. `your-mac.tailnet-name.ts.net`.)
+4. **In the app's Configure tab**, choose **Local network** and **set a
+   password**, then Save & Restart. (LAN bind covers the Tailscale interface.)
+5. **From your phone**, while connected to Tailscale, open:
+   ```
+   http://100.x.y.z:8787
+   ```
+   and enter the password.
+
+**Optional — HTTPS via Tailscale Serve** (encrypts the password in transit and
+gives a clean hostname):
+
+```bash
+tailscale serve --bg 8787
+```
+
+This publishes `https://your-mac.tailnet-name.ts.net/` to your tailnet with a
+valid certificate, proxying to the local app. Access that HTTPS URL from any of
+your Tailscale devices. (Requires HTTPS enabled for your tailnet in the admin
+console.)
+
+Tailscale gives you encrypted remote access with **no public exposure** — far
+safer than "Public" mode + port forwarding.
+
+---
+
+## Configuration files
+
+All gitignored (never committed):
+
+| File | Contents |
+|---|---|
+| `.env` | Tesla client ID/secret, domain, region, port |
+| `config/local-settings.json` | site ID, credentials, access mode + hashed password, rate override |
+| `config/schedule.json` | your active schedules |
+| `config/tokens.json` | Tesla OAuth access/refresh tokens |
+| `private-key.pem` / `*.pem` | your key pair |
+| `logs/` | run + server logs |
+
+Templates `config/default-schedule.json` and `.env.example` are committed; real
+values are created locally on first run.
+
+---
+
+## Tesla API reference
+
+Endpoints used:
 
 - `GET /api/1/products`
-- `POST /api/1/energy_sites/{site_id}/backup`
-- `POST /api/1/energy_sites/{site_id}/operation`
-- `POST /api/1/energy_sites/{site_id}/grid_import_export`
-- `GET /api/1/energy_sites/{site_id}/site_info`
-- `GET /api/1/energy_sites/{site_id}/live_status`
+- `GET /api/1/energy_sites/{id}/site_info`
+- `GET /api/1/energy_sites/{id}/live_status`
+- `GET /api/1/energy_sites/{id}/calendar_history` (energy + soe, for reports)
+- `POST /api/1/energy_sites/{id}/backup`
+- `POST /api/1/energy_sites/{id}/operation`
+- `POST /api/1/energy_sites/{id}/grid_import_export`
 
-Tesla documents the endpoint families, auth model, regions, and required scopes in the official Fleet API docs:
+Official docs: <https://developer.tesla.com/docs/fleet-api>
 
-- `https://developer.tesla.com/docs/fleet-api`
-- `https://developer.tesla.com/docs/fleet-api/authentication/overview`
-- `https://developer.tesla.com/docs/fleet-api/authentication/third-party-tokens`
-- `https://developer.tesla.com/docs/fleet-api/endpoints/partner-endpoints`
-- `https://developer.tesla.com/docs/fleet-api/endpoints/energy`
+The Fleet API may reject settings your utility, tariff, account, or firmware
+doesn't allow. Every response is kept in the Activity log so failures are easy
+to spot.
 
-The Fleet API may reject settings that your utility, tariff, region, account, or Powerwall firmware does not allow. The UI keeps every response in the activity log so failed payloads can be corrected quickly.
+---
 
-## Safety
+## Disclaimer
 
-- Test with **Dry Run** first.
-- Keep Tesla credentials local and do not commit `config/local-settings.json`, `config/tokens.json`, or `.env`.
-- Keep your actual outage reserve aligned with your risk tolerance.
-- Hot tub lockout still needs to be configured in the hot tub controller or its own automation system. Tesla cannot lock out that load directly unless it is separately controllable.
+This software is provided "as is," without warranty of any kind (see `LICENSE`).
+It changes real settings on your home battery, including the **backup reserve**
+that protects you during outages. You are solely responsible for the settings
+you schedule and their consequences. The savings reports are **estimates** — a
+home without solar would likely be on a different rate plan, and fixed charges,
+minimums, and true‑up are not modeled. Verify against your actual utility bills.
+
+Not affiliated with, endorsed by, or supported by Tesla, Inc. "Tesla" and
+"Powerwall" are trademarks of Tesla, Inc.

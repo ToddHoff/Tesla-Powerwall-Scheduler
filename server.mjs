@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { reconcileLaunchd, removeLegacyPlist } from './scripts/launchd-reconcile.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -35,12 +36,27 @@ const CONTENT_TYPES = {
 
 await ensureFiles();
 const env = await loadEnvFile(path.join(__dirname, '.env'));
-const port = Number(env.PORT || process.env.PORT || 8787);
+const serverSettings = await resolveServerSettings(env);
+const port = serverSettings.port;
+let lastGoodAuthHeader = null;
 
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || `localhost:${port}`}`);
 
+    // Basic Auth gate. Active whenever a password is configured. Public mode
+    // requires one (enforced on save and downgraded at startup if missing).
+    if (serverSettings.auth?.hash && !isAuthorized(req)) {
+      res.writeHead(401, {
+        'WWW-Authenticate': 'Basic realm="Tesla Powerwall Scheduler"',
+        'content-type': 'text/plain; charset=utf-8'
+      });
+      return res.end('Authentication required.');
+    }
+
+    if (url.pathname === '/api/server-config' && req.method === 'GET') return await serverConfigGet(res);
+    if (url.pathname === '/api/server-config' && req.method === 'POST') return await serverConfigPost(req, res);
+    if (url.pathname === '/api/restart' && req.method === 'POST') return await restartServer(res);
     if (url.pathname === '/api/config' && req.method === 'GET') return sendJson(res, await getPublicConfig());
     if (url.pathname === '/api/config' && req.method === 'POST') return await saveConfig(req, res);
     if (url.pathname === '/api/status' && req.method === 'GET') return sendJson(res, await getStatus());
@@ -63,8 +79,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(port, () => {
-  console.log(`Tesla scheduler running at http://localhost:${port}`);
+server.listen(serverSettings.port, serverSettings.host, () => {
+  console.log(`Tesla scheduler running on ${serverSettings.host}:${serverSettings.port} (access: ${serverSettings.accessMode})`);
 });
 
 await migrateAndReconcileOnStartup().catch(error => {
@@ -77,6 +93,127 @@ async function ensureFiles() {
   if (!existsSync(SCHEDULE_PATH)) await copyFile(DEFAULT_SCHEDULE_PATH, SCHEDULE_PATH);
   if (!existsSync(SETTINGS_PATH)) await writeJson(SETTINGS_PATH, {});
   if (!existsSync(RUN_STATE_PATH)) await writeJson(RUN_STATE_PATH, {});
+}
+
+// --- Server access mode + auth ---------------------------------------------
+
+async function resolveServerSettings(envVars) {
+  const local = await readJson(SETTINGS_PATH, {});
+  const s = local.server || {};
+  let accessMode = ['localhost', 'lan', 'public'].includes(s.accessMode) ? s.accessMode : 'localhost';
+  const auth = s.auth?.hash && s.auth?.salt ? s.auth : null;
+  // Why: a public-bound server with no password is an open Powerwall controller
+  // on the internet. Refuse to honor public without auth; fall back to localhost.
+  if (accessMode === 'public' && !auth) {
+    accessMode = 'localhost';
+    await logEvent('warn', 'public_without_password_downgraded_to_localhost', {});
+  }
+  const host = accessMode === 'localhost' ? '127.0.0.1' : '0.0.0.0';
+  const portNum = Number(s.port || envVars.PORT || process.env.PORT || 8787);
+  const port = Number.isInteger(portNum) && portNum >= 1024 && portNum <= 65535 ? portNum : 8787;
+  return { accessMode, host, port, auth };
+}
+
+function isAuthorized(req) {
+  const header = req.headers.authorization || '';
+  if (!header) return false;
+  if (header === lastGoodAuthHeader) return true;
+  const m = header.match(/^Basic\s+(.+)$/i);
+  if (!m) return false;
+  let decoded;
+  try {
+    decoded = Buffer.from(m[1], 'base64').toString('utf8');
+  } catch {
+    return false;
+  }
+  const password = decoded.slice(decoded.indexOf(':') + 1);
+  if (verifyPassword(password, serverSettings.auth)) {
+    lastGoodAuthHeader = header;
+    return true;
+  }
+  return false;
+}
+
+function hashPassword(plain) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(plain, salt, 64).toString('hex');
+  return { salt, hash };
+}
+
+function verifyPassword(plain, auth) {
+  if (!auth?.salt || !auth?.hash) return false;
+  const candidate = crypto.scryptSync(plain, auth.salt, 64);
+  const stored = Buffer.from(auth.hash, 'hex');
+  return candidate.length === stored.length && crypto.timingSafeEqual(candidate, stored);
+}
+
+function getLanIp() {
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name] || []) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+    }
+  }
+  return null;
+}
+
+async function serverConfigGet(res) {
+  const local = await readJson(SETTINGS_PATH, {});
+  const s = local.server || {};
+  const config = await readConfig();
+  return sendJson(res, {
+    accessMode: ['localhost', 'lan', 'public'].includes(s.accessMode) ? s.accessMode : 'localhost',
+    port: Number(s.port || env.PORT || 8787),
+    hasPassword: Boolean(s.auth?.hash),
+    timezone: config.timezone || 'America/Los_Angeles',
+    lanIp: getLanIp(),
+    // The mode actually in effect right now (may differ from saved if a public
+    // config was downgraded at startup for missing password).
+    activeAccessMode: serverSettings.accessMode,
+    activePort: serverSettings.port
+  });
+}
+
+async function serverConfigPost(req, res) {
+  const body = await readRequestJson(req);
+  const accessMode = ['localhost', 'lan', 'public'].includes(body.accessMode) ? body.accessMode : 'localhost';
+  const portNum = Number(body.port);
+  const port = Number.isInteger(portNum) && portNum >= 1024 && portNum <= 65535 ? portNum : serverSettings.port;
+
+  const local = await readJson(SETTINGS_PATH, {});
+  const existing = local.server || {};
+  let auth = existing.auth || null;
+  if (body.clearPassword) auth = null;
+  else if (body.password) auth = hashPassword(String(body.password));
+
+  if (accessMode === 'public' && !auth?.hash) {
+    return sendJson(res, { ok: false, error: 'Public access requires a password. Set one before selecting Public.' }, 400);
+  }
+
+  local.server = { accessMode, port, auth };
+  await writeJson(SETTINGS_PATH, local);
+
+  if (body.timezone && typeof body.timezone === 'string') {
+    const sched = await readJson(SCHEDULE_PATH, {});
+    sched.timezone = body.timezone;
+    await writeJson(SCHEDULE_PATH, sched);
+  }
+
+  const newHost = accessMode === 'localhost' ? '127.0.0.1' : '0.0.0.0';
+  const restartNeeded =
+    newHost !== serverSettings.host ||
+    port !== serverSettings.port ||
+    (auth?.hash || null) !== (serverSettings.auth?.hash || null);
+
+  await logEvent('info', 'server_config_saved', { accessMode, port, hasPassword: Boolean(auth?.hash), restartNeeded });
+  return sendJson(res, { ok: true, restartNeeded, accessMode, port, lanIp: getLanIp() });
+}
+
+async function restartServer(res) {
+  sendJson(res, { ok: true, restarting: true });
+  await logEvent('info', 'server_restart_requested', {});
+  // Exit cleanly; the LaunchAgent (KeepAlive) respawns us with the new config.
+  setTimeout(() => process.exit(0), 150);
 }
 
 async function loadEnvFile(filePath) {

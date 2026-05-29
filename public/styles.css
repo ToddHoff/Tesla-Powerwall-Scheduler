@@ -463,6 +463,51 @@ button.add-period:hover {
   overflow-y: auto;
 }
 
+.config-modes {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.config-mode {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid var(--muted);
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.config-mode div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.config-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+
+.config-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.config-note {
+  margin: 4px 0 12px;
+  line-height: 1.5;
+}
+
+.config-note.warn {
+  color: rgb(220, 160, 90);
+}
+
 .rate-plan-block {
   margin: 10px 0;
 }

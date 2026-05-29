@@ -207,6 +207,96 @@ h2 {
   display: none !important;
 }
 
+.reports-subnav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.reports-subnav button {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 6px 12px;
+}
+
+.reports-subnav button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.insights-findings {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.insight-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  background: rgba(255,255,255,0.02);
+}
+
+.insight-card-head {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.insight-card h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.insight-savings {
+  font-size: 18px;
+  font-weight: 700;
+  color: rgb(110, 200, 130);
+  white-space: nowrap;
+}
+
+.insight-summary {
+  margin: 8px 0 4px;
+  color: var(--ink);
+  line-height: 1.45;
+}
+
+.insight-recommendation {
+  margin: 4px 0 8px;
+  color: var(--muted);
+  font-style: italic;
+  line-height: 1.45;
+}
+
+.insight-card details {
+  margin-top: 6px;
+}
+
+.insight-card details pre {
+  margin: 6px 0 0;
+  font-size: 12px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.insight-confidence {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  margin-left: 8px;
+  background: rgba(255,255,255,0.08);
+  color: var(--muted);
+}
+
 .metric,
 .panel {
   background: color-mix(in srgb, var(--panel) 94%, white);

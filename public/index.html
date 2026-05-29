@@ -33,9 +33,7 @@
 
       <nav class="app-tabs" aria-label="Views">
         <button class="active" data-view="schedules">Schedules</button>
-        <button data-view="net-billing">Net Billing</button>
-        <button data-view="tou-cost">TOU Cost</button>
-        <button data-view="solar-savings">Solar Savings</button>
+        <button data-view="reports">Reports</button>
         <button data-view="settings">Settings</button>
         <button data-view="rates">Rates</button>
         <button data-view="configure">Configure</button>
@@ -124,7 +122,40 @@
         </section>
       </section>
 
-      <section id="netBillingView" class="view-panel panel report-panel hidden">
+      <section id="reportsView" class="view-panel hidden">
+        <nav class="reports-subnav" aria-label="Report sub-views">
+          <button class="active" data-subview="insights">Insights</button>
+          <button data-subview="net-billing">Net Billing</button>
+          <button data-subview="tou-cost">TOU Cost</button>
+          <button data-subview="solar-savings">Solar Savings</button>
+        </nav>
+
+        <section id="insightsView" class="report-subview panel report-panel">
+          <div class="report-card">
+            <div class="section-head compact">
+              <div>
+                <h2>Insights</h2>
+                <p>Rules-based recommendations from the last 30 days of data. Cost estimates use your effective rate plan.</p>
+              </div>
+              <button id="runInsights" class="primary">Run Analysis</button>
+            </div>
+
+            <div id="insightsStatus" class="operation-status" aria-live="polite"></div>
+            <div id="insightsSummary" class="report-summary"></div>
+            <div id="insightsFindings" class="insights-findings"></div>
+
+            <div class="section-head compact report-text-head">
+              <div>
+                <h2>Prompt for an external AI</h2>
+                <p>Paste this into ChatGPT, Claude, or Gemini for additional analysis. All the data is included — no follow-up questions needed.</p>
+              </div>
+              <button id="copyInsightsPrompt">Copy</button>
+            </div>
+            <textarea id="insightsPrompt" readonly rows="22" spellcheck="false"></textarea>
+          </div>
+        </section>
+
+      <section id="netBillingView" class="report-subview panel report-panel hidden">
         <div class="report-card">
           <div class="section-head compact">
             <div>
@@ -238,7 +269,7 @@
         </div>
       </section>
 
-      <section id="touCostView" class="view-panel panel report-panel hidden">
+      <section id="touCostView" class="report-subview panel report-panel hidden">
         <div class="report-card">
           <div class="section-head compact">
             <div>
@@ -330,7 +361,7 @@
         </div>
       </section>
 
-      <section id="solarSavingsView" class="view-panel panel report-panel hidden">
+      <section id="solarSavingsView" class="report-subview panel report-panel hidden">
         <div class="report-card">
           <div class="section-head compact">
             <div>
@@ -415,6 +446,7 @@
           <textarea id="solarReportText" readonly rows="16" spellcheck="false"></textarea>
         </div>
       </section>
+      </section><!-- /reportsView -->
 
       <section id="settingsView" class="view-panel panel hidden">
         <div class="section-head">

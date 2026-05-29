@@ -16,6 +16,15 @@ let configData = null;
 const els = {
   viewButtons: [...document.querySelectorAll('.app-tabs button')],
   schedulesView: document.querySelector('#schedulesView'),
+  reportsView: document.querySelector('#reportsView'),
+  reportsSubnav: document.querySelector('.reports-subnav'),
+  insightsView: document.querySelector('#insightsView'),
+  runInsights: document.querySelector('#runInsights'),
+  insightsStatus: document.querySelector('#insightsStatus'),
+  insightsSummary: document.querySelector('#insightsSummary'),
+  insightsFindings: document.querySelector('#insightsFindings'),
+  insightsPrompt: document.querySelector('#insightsPrompt'),
+  copyInsightsPrompt: document.querySelector('#copyInsightsPrompt'),
   netBillingView: document.querySelector('#netBillingView'),
   touCostView: document.querySelector('#touCostView'),
   settingsView: document.querySelector('#settingsView'),
@@ -163,6 +172,113 @@ els.addRow.addEventListener('click', () => {
 });
 
 els.runNetBillingReport.addEventListener('click', runNetBillingReport);
+els.runInsights.addEventListener('click', runInsights);
+els.copyInsightsPrompt.addEventListener('click', async () => {
+  await runWithFeedback({
+    buttons: [els.copyInsightsPrompt],
+    pendingText: 'Copying...',
+    successText: 'Copy',
+    statusEl: els.insightsStatus,
+    pendingMessage: 'Copying prompt...',
+    successMessage: 'Copied prompt — paste into your AI of choice.',
+    task: async () => copyText(els.insightsPrompt.value)
+  });
+});
+
+async function runInsights() {
+  await runWithFeedback({
+    buttons: [els.runInsights],
+    pendingText: 'Analyzing...',
+    successText: 'Run Analysis',
+    statusEl: els.insightsStatus,
+    pendingMessage: 'Pulling 30 days of energy data and running analyzers...',
+    successMessage: 'Analysis complete.',
+    task: async () => {
+      // 14 days keeps us under Tesla's rate limit for calendar_history while
+      // still giving a good signal. Bump higher manually if you need it.
+      const result = await api('/api/insights?days=14');
+      insightsFetched = true;
+      renderInsights(result);
+    }
+  });
+}
+
+function renderInsights(report) {
+  const sm = report.summary || {};
+  els.insightsSummary.replaceChildren();
+  const cards = [
+    ['Days analyzed', String(sm.days || 0)],
+    ['Findings', String(sm.findingCount || 0)],
+    ['Est. monthly savings', formatCurrency(sm.monthlySavingsTotal || 0)],
+    ['Home consumption', `${formatKwh(sm.totalHomeKwh || 0)} kWh`]
+  ];
+  for (const [label, value] of cards) {
+    const item = document.createElement('div');
+    item.className = 'report-metric';
+    const s = document.createElement('span'); s.textContent = label;
+    const v = document.createElement('strong'); v.textContent = value;
+    item.append(s, v);
+    els.insightsSummary.append(item);
+  }
+
+  els.insightsFindings.replaceChildren();
+  const findings = report.findings || [];
+  if (!findings.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted-meta';
+    empty.textContent = 'No findings — the analyzers had nothing to flag for this period. The AI prompt below still has the full data dump if you want a second opinion.';
+    els.insightsFindings.append(empty);
+  } else {
+    for (const f of findings) els.insightsFindings.append(renderInsightCard(f));
+  }
+
+  els.insightsPrompt.value = report.aiPrompt || '';
+}
+
+function renderInsightCard(f) {
+  const card = document.createElement('div');
+  card.className = 'insight-card';
+  const head = document.createElement('div');
+  head.className = 'insight-card-head';
+
+  const titleWrap = document.createElement('div');
+  const h3 = document.createElement('h3');
+  h3.textContent = f.title;
+  const conf = document.createElement('span');
+  conf.className = 'insight-confidence';
+  conf.textContent = `${f.confidence || 'medium'} confidence`;
+  h3.append(conf);
+  titleWrap.append(h3);
+
+  const savings = document.createElement('div');
+  savings.className = 'insight-savings';
+  savings.textContent = `~${formatCurrency(f.monthlySavingsEstimate || 0)}/mo`;
+
+  head.append(titleWrap, savings);
+  card.append(head);
+
+  const summary = document.createElement('p');
+  summary.className = 'insight-summary';
+  summary.textContent = f.summary;
+  card.append(summary);
+
+  const rec = document.createElement('p');
+  rec.className = 'insight-recommendation';
+  rec.textContent = f.recommendation;
+  card.append(rec);
+
+  const details = document.createElement('details');
+  const summaryEl = document.createElement('summary');
+  summaryEl.textContent = 'details';
+  summaryEl.className = 'muted-meta';
+  details.append(summaryEl);
+  const pre = document.createElement('pre');
+  pre.textContent = JSON.stringify(f.details || {}, null, 2);
+  details.append(pre);
+  card.append(details);
+
+  return card;
+}
 els.runTouReport.addEventListener('click', runTouReport);
 els.runSolarSavings.addEventListener('click', runSolarSavings);
 els.solarBilled.addEventListener('input', () => { if (lastSolarReport) renderSolarSavings(lastSolarReport); });
@@ -514,23 +630,41 @@ async function load() {
   await refreshStatus();
 }
 
+let activeReportSubview = 'insights';
+let insightsFetched = false;
+
 function setView(view) {
   const selected = view || 'schedules';
   els.viewButtons.forEach(button => button.classList.toggle('active', button.dataset.view === selected));
   els.schedulesView.classList.toggle('hidden', selected !== 'schedules');
-  els.netBillingView.classList.toggle('hidden', selected !== 'net-billing');
-  els.touCostView.classList.toggle('hidden', selected !== 'tou-cost');
-  els.solarSavingsView.classList.toggle('hidden', selected !== 'solar-savings');
+  els.reportsView.classList.toggle('hidden', selected !== 'reports');
   els.settingsView.classList.toggle('hidden', selected !== 'settings');
   els.ratesView.classList.toggle('hidden', selected !== 'rates');
   els.configureView.classList.toggle('hidden', selected !== 'configure');
   els.activityView.classList.toggle('hidden', selected !== 'activity');
+  if (selected === 'reports') setReportSubview(activeReportSubview);
   if (selected === 'settings') {
     if (!settingsFetched) refreshSettings();
     refreshSchedulerStatus();
   }
   if (selected === 'rates' && !ratesFetched) loadRates();
   if (selected === 'configure' && !configFetched) loadConfigure();
+}
+
+function setReportSubview(name) {
+  activeReportSubview = name;
+  for (const btn of els.reportsSubnav.querySelectorAll('button')) {
+    btn.classList.toggle('active', btn.dataset.subview === name);
+  }
+  els.insightsView.classList.toggle('hidden', name !== 'insights');
+  els.netBillingView.classList.toggle('hidden', name !== 'net-billing');
+  els.touCostView.classList.toggle('hidden', name !== 'tou-cost');
+  els.solarSavingsView.classList.toggle('hidden', name !== 'solar-savings');
+  if (name === 'insights' && !insightsFetched) runInsights();
+}
+
+for (const btn of els.reportsSubnav.querySelectorAll('button')) {
+  btn.addEventListener('click', () => setReportSubview(btn.dataset.subview));
 }
 
 function render() {

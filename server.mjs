@@ -75,6 +75,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/reports/net-billing' && req.method === 'GET') return await netBillingReport(url, res);
     if (url.pathname === '/api/reports/tou-cost' && req.method === 'GET') return await touCostReport(url, res);
     if (url.pathname === '/api/reports/solar-savings' && req.method === 'GET') return await solarSavingsReport(url, res);
+    if (url.pathname === '/api/insights' && req.method === 'GET') return await insightsReport(url, res);
     if (url.pathname === '/api/rates' && req.method === 'GET') return await ratesGet(res);
     if (url.pathname === '/api/rates' && req.method === 'POST') return await ratesPost(req, res);
     if (url.pathname === '/api/logs/clear' && req.method === 'POST') return await clearLogs(req, res);
@@ -938,6 +939,378 @@ function formatHour12(hourNum) {
   let h12 = h % 12;
   if (h12 === 0) h12 = 12;
   return `${h12}:00:00 ${ampm}`;
+}
+
+// --- Insights (rules-based recommendations) --------------------------------
+
+async function insightsReport(url, res) {
+  const config = await readConfig();
+  requireTeslaSetting(config.tesla.energySiteId, 'Energy site ID');
+  const timeZone = config.timezone || 'America/Los_Angeles';
+  const days = Math.max(7, Math.min(60, Number(url.searchParams.get('days') || 30)));
+
+  const today = zonedParts(new Date(), timeZone);
+  const dates = lastNDates(today.date, days);
+
+  const siteInfo = await teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/site_info`);
+  const localSettings = await readJson(SETTINGS_PATH, {});
+  const tariff = buildRatePlan(localSettings, siteInfo);
+  if (!tariff) {
+    return sendJson(res, { error: 'No rate plan available; cannot run insights.' }, 502);
+  }
+  const activeSched = activeSchedule(config);
+
+  // Aggregate the last N days into per-period totals + per-day SOE samples.
+  const agg = {
+    days: dates.length,
+    timeZone,
+    perPeriod: {},      // periodName -> { kWhImported, kWhBatteryToLoad, kWhBatteryFromGrid, kWhGridImport }
+    perHour: new Array(24).fill(0).map(() => ({ load: 0, gridToLoad: 0, batToLoad: 0, solToLoad: 0, batFromGrid: 0, solToBat: 0 })),
+    soeBreachDays: [],
+    totalHomeKwh: 0,
+    overnightGridChargeKwh: 0,
+    overnightGridChargeDailyCount: 0,
+    solarSurplusAfterBatteryFullKwh: 0
+  };
+
+  for (const date of dates) {
+    const energyParams = new URLSearchParams({
+      kind: 'energy', period: 'day',
+      start_date: zonedDateTimeParam(date, '00:00:00', timeZone),
+      end_date:   zonedDateTimeParam(date, '23:59:59', timeZone),
+      time_zone:  timeZone
+    });
+    const soeParams = new URLSearchParams({
+      kind: 'soe', period: 'day',
+      start_date: zonedDateTimeParam(date, '00:00:00', timeZone),
+      end_date:   zonedDateTimeParam(date, '23:59:59', timeZone),
+      time_zone:  timeZone
+    });
+    const [energyRaw, soeRaw] = await Promise.all([
+      teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/calendar_history?${energyParams}`),
+      teslaFetch(`/api/1/energy_sites/${config.tesla.energySiteId}/calendar_history?${soeParams}`)
+    ]);
+    const intervals = Array.isArray(energyRaw.response?.time_series) ? energyRaw.response.time_series : [];
+    const soeSeries = Array.isArray(soeRaw.response?.time_series) ? soeRaw.response.time_series : [];
+    aggregateDayIntoInsights({ date, intervals, soeSeries, tariff, agg });
+  }
+
+  // Find the peak window (per current season) and reserve floor to reason about.
+  const todaySeason = seasonForDate(today.date, tariff);
+  const peakWindow = findPeakWindow(todaySeason);
+  const peakRate = rateForPeriodIn(todaySeason, isPeakName);
+  const partialRate = rateForPeriodIn(todaySeason, isPartialPeakName);
+  const offRate = rateForPeriodIn(todaySeason, isOffPeakName);
+  const currentReserve = Number(siteInfo?.response?.backup_reserve_percent ?? 30);
+
+  const ctx = {
+    days: dates.length,
+    agg,
+    tariff,
+    schedule: activeSched,
+    siteInfo: siteInfo?.response || {},
+    peakWindow,
+    rates: { peak: peakRate, partial: partialRate, off: offRate },
+    currentReserve
+  };
+
+  const findings = [];
+  for (const fn of ANALYZERS) {
+    const finding = fn(ctx);
+    if (finding) findings.push(finding);
+  }
+  findings.sort((a, b) => (b.monthlySavingsEstimate || 0) - (a.monthlySavingsEstimate || 0));
+
+  const summary = {
+    days: dates.length,
+    findingCount: findings.length,
+    monthlySavingsTotal: roundCurrency(findings.reduce((s, f) => s + (f.monthlySavingsEstimate || 0), 0)),
+    totalHomeKwh: round(agg.totalHomeKwh)
+  };
+
+  const aiPrompt = buildAiPrompt(ctx, findings, summary);
+  await logEvent('info', 'insights_report', { days: summary.days, findingCount: summary.findingCount, monthlySavings: summary.monthlySavingsTotal });
+  return sendJson(res, { days: dates.length, summary, findings, aiPrompt, ratePlan: tariff });
+}
+
+function lastNDates(endDate, n) {
+  // endDate as YYYY-MM-DD; produce last n calendar dates ending at endDate-1 (yesterday inclusive).
+  const out = [];
+  const [y, m, d] = endDate.split('-').map(Number);
+  const ref = new Date(Date.UTC(y, m - 1, d));
+  for (let i = n; i >= 1; i -= 1) {
+    const dt = new Date(ref.getTime() - i * 24 * 60 * 60 * 1000);
+    out.push(`${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`);
+  }
+  return out;
+}
+
+function aggregateDayIntoInsights({ date, intervals, soeSeries, tariff, agg }) {
+  const season = seasonForDate(date, tariff);
+  const peakWindow = findPeakWindow(season);
+  const reserveFloor = 30; // conservative — actual current reserve passed via context if needed
+
+  let minSoeBeforePeakEnd = Infinity;
+  for (const s of soeSeries) {
+    const ts = String(s.timestamp || '');
+    if (ts.length < 16) continue;
+    const minute = Number(ts.slice(14, 16));
+    const hour = Number(ts.slice(11, 13));
+    const cur = hour * 60 + minute;
+    // Only check up to peak end.
+    if (cur < peakWindow.endMin) minSoeBeforePeakEnd = Math.min(minSoeBeforePeakEnd, Number(s.soe));
+  }
+  if (Number.isFinite(minSoeBeforePeakEnd) && minSoeBeforePeakEnd <= reserveFloor + 2) {
+    agg.soeBreachDays.push({ date, minSoe: round(minSoeBeforePeakEnd) });
+  }
+
+  let dailyOvernightGridCharge = 0;
+  for (const interval of intervals) {
+    const ts = String(interval.timestamp || '');
+    if (ts.length < 16) continue;
+    const hour = Number(ts.slice(11, 13));
+    const minute = Number(ts.slice(14, 16));
+    const weekday = localWeekday(ts);
+    const period = periodForLocalTime(hour, minute, weekday, season);
+
+    const gridToLoad = whToKwh(Number(interval.consumer_energy_imported_from_grid || 0));
+    const batToLoad = whToKwh(Number(interval.consumer_energy_imported_from_battery || 0));
+    const solToLoad = whToKwh(Number(interval.consumer_energy_imported_from_solar || 0));
+    const batFromGrid = whToKwh(Number(interval.battery_energy_imported_from_grid || 0));
+    const solToBat = whToKwh(Number(interval.battery_energy_imported_from_solar || 0));
+    const solToGrid = whToKwh(Number(interval.grid_energy_exported_from_solar || 0));
+    const load = whToKwh(Number(interval.total_home_usage || 0));
+
+    agg.totalHomeKwh += load;
+    if (hour >= 0 && hour < 24) {
+      agg.perHour[hour].load += load;
+      agg.perHour[hour].gridToLoad += gridToLoad;
+      agg.perHour[hour].batToLoad += batToLoad;
+      agg.perHour[hour].solToLoad += solToLoad;
+      agg.perHour[hour].batFromGrid += batFromGrid;
+      agg.perHour[hour].solToBat += solToBat;
+    }
+
+    if (!agg.perPeriod[period]) {
+      agg.perPeriod[period] = { kWhImported: 0, kWhBatteryToLoad: 0, kWhBatteryFromGrid: 0, kWhLoad: 0, kWhSolarToGrid: 0 };
+    }
+    const p = agg.perPeriod[period];
+    p.kWhImported += gridToLoad + batFromGrid;
+    p.kWhBatteryToLoad += batToLoad;
+    p.kWhBatteryFromGrid += batFromGrid;
+    p.kWhLoad += load;
+    p.kWhSolarToGrid += solToGrid;
+
+    // Overnight grid charge: midnight to 6 AM, battery import from grid.
+    if (hour < 6) dailyOvernightGridCharge += batFromGrid;
+
+    // Solar surplus after battery full: rough proxy = solar exported to grid > 0 while solar was producing.
+    if (solToGrid > 0) agg.solarSurplusAfterBatteryFullKwh += solToGrid;
+  }
+  if (dailyOvernightGridCharge > 0) {
+    agg.overnightGridChargeKwh += dailyOvernightGridCharge;
+    agg.overnightGridChargeDailyCount += 1;
+  }
+}
+
+function rateForPeriodIn(season, matcher) {
+  for (const p of season?.periods || []) {
+    if (matcher(p.name)) return p.buyRate || 0;
+  }
+  return 0;
+}
+
+// --- Analyzers --------------------------------------------------------------
+
+const ANALYZERS = [
+  analyzePeakGridImports,
+  analyzePartialPeakImports,
+  analyzeReserveFloorBreaches,
+  analyzeModeMismatchMornings,
+  analyzeUnproductiveGridCharging
+];
+
+function dailyToMonthly(value, days) {
+  // Project a per-period number to a 30-day month.
+  return (value / Math.max(1, days)) * 30;
+}
+
+function analyzePeakGridImports(ctx) {
+  const peak = pickPeriod(ctx.agg.perPeriod, isPeakName);
+  if (!peak) return null;
+  const kWh = peak.kWhImported;
+  if (kWh < 0.5) return null; // negligible — already covered
+  const periodCost = kWh * ctx.rates.peak;
+  const monthlyCost = dailyToMonthly(periodCost, ctx.days);
+  // Assume pre-charging at off-peak would cover 75% of these imports.
+  const savings = 0.75 * monthlyCost * (1 - ctx.rates.off / Math.max(ctx.rates.peak, 0.0001));
+  return {
+    id: 'peak-grid-imports',
+    title: 'Grid imports during the 4–9 PM peak window',
+    summary: `Over the last ${ctx.days} days you imported ${round(kWh)} kWh during peak hours at $${ctx.rates.peak.toFixed(5)}/kWh — about ${formatCurrency(monthlyCost)}/month at peak rates.`,
+    recommendation: `Charge the battery further during off-peak (midnight–7 AM at $${ctx.rates.off.toFixed(5)}/kWh) so it can carry more of peak. Likely savings: ${formatCurrency(savings)}/month.`,
+    monthlySavingsEstimate: roundCurrency(savings),
+    confidence: kWh > 5 ? 'high' : 'medium',
+    details: { peakKwh: round(kWh), peakRate: ctx.rates.peak, offPeakRate: ctx.rates.off, periodDays: ctx.days, projectedMonthlyCost: roundCurrency(monthlyCost) }
+  };
+}
+
+function analyzePartialPeakImports(ctx) {
+  const partial = pickPeriod(ctx.agg.perPeriod, isPartialPeakName);
+  if (!partial || !ctx.rates.partial) return null;
+  const kWh = partial.kWhImported;
+  if (kWh < 0.5) return null;
+  const periodCost = kWh * ctx.rates.partial;
+  const monthlyCost = dailyToMonthly(periodCost, ctx.days);
+  const savings = 0.8 * monthlyCost * (1 - ctx.rates.off / Math.max(ctx.rates.partial, 0.0001));
+  return {
+    id: 'partial-peak-imports',
+    title: 'Grid imports during partial-peak windows (3–4 PM / 9 PM–midnight)',
+    summary: `Over the last ${ctx.days} days you imported ${round(kWh)} kWh during partial-peak at $${ctx.rates.partial.toFixed(5)}/kWh — about ${formatCurrency(monthlyCost)}/month.`,
+    recommendation: `Self-Powered mode after 9 PM keeps the battery serving load through partial-peak. Likely savings: ${formatCurrency(savings)}/month.`,
+    monthlySavingsEstimate: roundCurrency(savings),
+    confidence: kWh > 5 ? 'high' : 'medium',
+    details: { partialPeakKwh: round(kWh), partialPeakRate: ctx.rates.partial, offPeakRate: ctx.rates.off, projectedMonthlyCost: roundCurrency(monthlyCost) }
+  };
+}
+
+function analyzeReserveFloorBreaches(ctx) {
+  const breaches = ctx.agg.soeBreachDays || [];
+  if (breaches.length < 2) return null;
+  // Rough $: each breach day -> some kWh lost during peak * peakRate. Estimate 1.5 kWh/day on average.
+  const monthlyDays = (breaches.length / ctx.days) * 30;
+  const lostKwh = monthlyDays * 1.5;
+  const savings = lostKwh * (ctx.rates.peak - ctx.rates.off);
+  return {
+    id: 'reserve-floor-breach',
+    title: 'Battery hit the reserve floor before 9 PM',
+    summary: `On ${breaches.length} of the last ${ctx.days} days the battery dropped to (or within 2% of) the ${ctx.currentReserve}% reserve floor before peak ended. Once the floor is hit, the home pulls from grid at peak rates.`,
+    recommendation: `Raise the 3 PM step's backup reserve by 5–10 percentage points so the battery has more capacity heading into peak. Likely savings: ${formatCurrency(savings)}/month.`,
+    monthlySavingsEstimate: roundCurrency(savings),
+    confidence: breaches.length >= 5 ? 'high' : 'medium',
+    details: { breachDays: breaches, currentReserve: ctx.currentReserve, peakRate: ctx.rates.peak, offPeakRate: ctx.rates.off }
+  };
+}
+
+function analyzeModeMismatchMornings(ctx) {
+  // Morning hours (6–9 AM): if there's notable grid-to-load while battery still had capacity,
+  // Time-Based Control was likely preserving the battery. Self-Powered would have served it.
+  let morningGridLoad = 0;
+  for (let h = 6; h < 12; h += 1) morningGridLoad += ctx.agg.perHour[h].gridToLoad;
+  if (morningGridLoad < 1) return null;
+  const period = pickPeriod(ctx.agg.perPeriod, isOffPeakName);
+  const offRate = ctx.rates.off || (period ? 0 : 0.46);
+  const periodCost = morningGridLoad * offRate;
+  const monthlyCost = dailyToMonthly(periodCost, ctx.days);
+  // Switching to Self-Powered captures ~85% of this load from battery.
+  const savings = 0.85 * monthlyCost;
+  return {
+    id: 'mode-mismatch-mornings',
+    title: 'Morning load (6 AM–noon) pulled from grid instead of battery',
+    summary: `Over the last ${ctx.days} days, ${round(morningGridLoad)} kWh of morning load came from the grid at $${offRate.toFixed(5)}/kWh — about ${formatCurrency(monthlyCost)}/month. Time-Based Control mode preserves the battery for peak instead of discharging it.`,
+    recommendation: `Add a Self-Powered step at ~7 AM so the battery serves the morning hot tub / heating load. Likely savings: ${formatCurrency(savings)}/month.`,
+    monthlySavingsEstimate: roundCurrency(savings),
+    confidence: morningGridLoad > 5 ? 'high' : 'medium',
+    details: { morningGridLoadKwh: round(morningGridLoad), offRate, projectedMonthlyCost: roundCurrency(monthlyCost) }
+  };
+}
+
+function analyzeUnproductiveGridCharging(ctx) {
+  const overnightKwh = ctx.agg.overnightGridChargeKwh;
+  const surplus = ctx.agg.solarSurplusAfterBatteryFullKwh;
+  if (overnightKwh < 1 || surplus < overnightKwh) return null;
+  // Heuristic: if solar exported more than was grid-charged overnight, the grid charging was likely unnecessary.
+  const offRate = ctx.rates.off || 0.46;
+  const wastedCost = dailyToMonthly(overnightKwh * offRate, ctx.days);
+  return {
+    id: 'unproductive-grid-charging',
+    title: 'Overnight grid-charging that solar later replaced',
+    summary: `Across ${ctx.agg.overnightGridChargeDailyCount} day(s) the battery grid-charged a total of ${round(overnightKwh)} kWh overnight, but those same days had ${round(surplus)} kWh of solar exported to the grid — meaning solar likely would have filled the battery anyway.`,
+    recommendation: `Lower the midnight backup reserve target (or only enable grid charging in winter months) to avoid paying ~${formatCurrency(wastedCost)}/month for energy solar gives you free.`,
+    monthlySavingsEstimate: roundCurrency(wastedCost),
+    confidence: surplus > overnightKwh * 1.5 ? 'high' : 'medium',
+    details: { overnightGridChargeKwh: round(overnightKwh), solarSurplusKwh: round(surplus), offRate }
+  };
+}
+
+function pickPeriod(perPeriod, matcher) {
+  for (const [name, totals] of Object.entries(perPeriod || {})) {
+    if (matcher(name)) return totals;
+  }
+  return null;
+}
+
+function formatCurrency(value) {
+  const n = Number(value || 0);
+  return `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(2)}`;
+}
+
+function buildAiPrompt(ctx, findings, summary) {
+  const lines = [
+    'You are an energy-cost analyst for a residential solar + Powerwall customer on a time-of-use rate plan. Identify the top 3 additional cost-saving opportunities I may be missing, beyond what the rules-based analyzers already found. Be specific with dollar estimates and concrete schedule / setting changes. Acknowledge if the data is insufficient for a recommendation.',
+    '',
+    `Period analyzed: last ${summary.days} days. Total home consumption: ${round(ctx.agg.totalHomeKwh)} kWh.`,
+    '',
+    'RATE PLAN',
+    `Source: ${ctx.tariff.source}, code "${ctx.tariff.code}", utility "${ctx.tariff.utility}".`
+  ];
+  for (const season of ctx.tariff.seasons || []) {
+    lines.push(`  ${season.label} (months ${season.fromMonth ?? season.startMonth}-${season.toMonth ?? season.nextStartMonth}):`);
+    for (const period of season.periods || []) {
+      const w = period.windows?.[0];
+      const win = w ? `${formatMinutesAsTimePrompt(w.startMin)}–${formatMinutesAsTimePrompt(w.endMin)}` : 'unknown';
+      lines.push(`    ${period.name} ${win}  buy $${(period.buyRate || 0).toFixed(5)}/kWh  sell $${(period.sellRate || 0).toFixed(5)}/kWh`);
+    }
+  }
+
+  lines.push('', 'ACTIVE SCHEDULE');
+  for (const row of ctx.schedule?.schedule || []) {
+    if (!row.enabled) continue;
+    lines.push(`  ${row.time}  reserve ${row.backupReservePercent}%  mode ${row.operationMode}  exports ${row.energyExports}  grid charging ${row.gridCharging ? 'on' : 'off'}`);
+  }
+
+  lines.push('', 'CURRENT POWERWALL SETTINGS',
+    `  backup_reserve_percent: ${ctx.siteInfo.backup_reserve_percent}`,
+    `  default_real_mode: ${ctx.siteInfo.default_real_mode}`,
+    `  customer_preferred_export_rule: ${ctx.siteInfo.components?.customer_preferred_export_rule}`,
+    `  disallow_charge_from_grid_with_solar_installed: ${ctx.siteInfo.components?.disallow_charge_from_grid_with_solar_installed}`
+  );
+
+  lines.push('', 'AGGREGATE — kWh by TOU period (last ' + summary.days + ' days)');
+  for (const [name, t] of Object.entries(ctx.agg.perPeriod || {})) {
+    lines.push(`  ${name}: load ${round(t.kWhLoad)} kWh, grid imports ${round(t.kWhImported)} kWh, battery→load ${round(t.kWhBatteryToLoad)} kWh, battery from grid ${round(t.kWhBatteryFromGrid)} kWh, solar→grid ${round(t.kWhSolarToGrid)} kWh`);
+  }
+
+  lines.push('', 'HOURLY PROFILE — average kWh per hour-of-day (load, grid→load, battery→load, solar→load)');
+  for (let h = 0; h < 24; h += 1) {
+    const x = ctx.agg.perHour[h];
+    const avg = v => (v / summary.days).toFixed(3);
+    lines.push(`  ${String(h).padStart(2, '0')}:00  load ${avg(x.load)}  grid→load ${avg(x.gridToLoad)}  bat→load ${avg(x.batToLoad)}  solar→load ${avg(x.solToLoad)}`);
+  }
+
+  if (ctx.agg.soeBreachDays?.length) {
+    lines.push('', 'BATTERY RESERVE-FLOOR BREACH DAYS', `  current reserve setting: ${ctx.currentReserve}%`);
+    for (const b of ctx.agg.soeBreachDays) lines.push(`  ${b.date} — min SOE before 9 PM: ${b.minSoe}%`);
+  }
+
+  lines.push('', 'RULES-BASED FINDINGS WE ALREADY GENERATED');
+  if (findings.length === 0) {
+    lines.push('  (none — recommend explicitly looking for less obvious patterns)');
+  } else {
+    for (const f of findings) lines.push(`  - ${f.title} — ${f.summary} Recommended: ${f.recommendation}`);
+  }
+
+  lines.push('', 'YOUR TASK', 'Recommend 3 additional or refined opportunities. Quantify in dollars where possible. Be honest about uncertainty.');
+
+  return lines.join('\n');
+}
+
+function formatMinutesAsTimePrompt(min) {
+  if (min == null) return '—';
+  const m = Math.max(0, Math.min(1440, Math.round(min)));
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
 // --- Rate plan abstraction -------------------------------------------------

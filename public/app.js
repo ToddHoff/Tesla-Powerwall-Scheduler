@@ -1959,8 +1959,13 @@ function renderConfigure() {
   }
   els.configPort.value = c.port || 8787;
   els.configTimezone.value = c.timezone || 'America/Los_Angeles';
+  // When a password is set, show a bullet sentinel in the field so the
+  // section visibly reads "filled in" rather than empty. The save handler
+  // treats the sentinel as "no change". Same convention as the masked
+  // client secret on the Schedules tab.
+  els.configPassword.value = c.hasPassword ? '••••••••' : '';
   els.configPasswordState.textContent = c.hasPassword
-    ? 'A password is currently set. Leave blank to keep it.'
+    ? 'A password is currently set.'
     : 'No password set.';
   els.configActiveTag.textContent = `Now serving: ${c.activeAccessMode} on port ${c.activePort}`;
   // If saved mode was public but downgraded for missing password, flag it.
@@ -2000,7 +2005,10 @@ els.configPort.addEventListener('input', updateAccessNote);
 
 els.configSave.addEventListener('click', async () => {
   const mode = selectedAccessMode();
-  const password = els.configPassword.value;
+  // Treat the bullet sentinel as "no change" — only send a new password if the
+  // user actually typed one.
+  const rawPassword = els.configPassword.value;
+  const password = rawPassword === '••••••••' ? '' : rawPassword;
   const clearPassword = els.configClearPassword.checked;
   if (mode === 'public' && !password && !configData?.hasPassword) {
     setStatus(els.configStatus, 'Public access requires a password. Set one first.', 'error');

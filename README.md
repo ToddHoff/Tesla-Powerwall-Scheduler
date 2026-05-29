@@ -165,8 +165,15 @@ Localhost):
 | **Public** | the URL of the tunnel/reverse proxy you set up | the public internet, **with a password** |
 
 If a password is set (any mode except localhost should have one), the browser
-prompts for it via HTTP Basic Auth — leave the username blank or type anything,
-and enter your password.
+prompts for both a **username** and a **password** via HTTP Basic Auth.
+
+- **Username:** type `admin`. (The server doesn't actually check the username
+  field — it only validates the password. `admin` is just a convention so the
+  prompt isn't confusing.)
+- **Password:** the one you set in **Configure** → Password.
+
+Most browsers will remember the credentials per host, so you usually won't be
+asked again until you clear site data or open a private window.
 
 ### Finding the URL for your machine
 

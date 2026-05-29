@@ -39,8 +39,11 @@ actual PG&E bill.
 
 ## Requirements
 
-- **macOS or Linux.** macOS uses `launchd` per-user agents; Linux uses `cron`.
-  The backend is picked automatically.
+- **macOS** (developed and tested here). macOS uses `launchd` per-user agents.
+- **Linux** *should* work — the cron backend is platform-portable — but
+  has **not been tested**. See [Linux (untested)](#linux-untested) below.
+- **Windows** is **not supported** as-is; you'd run it under WSL2. See
+  [Windows (untested)](#windows-untested) below.
 - **Node.js 20+** (`node --version`).
 - A computer that **stays on 24/7**. Neither launchd nor cron runs (or wakes
   the machine) while it's asleep, so a sleeping or shut-down machine misses
@@ -102,11 +105,16 @@ continuing.
 
 ### 4. Register your partner account
 
-Put your values in `.env` (copy the template first):
+Put your values in a `.env` file **in the repo root** (the same directory as
+`server.mjs` and `package.json` — *not* inside `config/` or `scripts/`). Copy
+the template first:
 
 ```bash
-cp .env.example .env
+cd /path/to/this/repo   # the directory you cloned into
+cp .env.example .env    # creates ./.env next to package.json
 ```
+
+Then edit `.env`:
 
 ```
 TESLA_CLIENT_ID=your-client-id
@@ -114,6 +122,8 @@ TESLA_CLIENT_SECRET=your-client-secret
 TESLA_APP_DOMAIN=your-domain.com
 TESLA_REGION=na          # na | eu | cn
 ```
+
+`.env` is gitignored, so it never gets committed.
 
 Then register (run once per region you use):
 
@@ -135,13 +145,73 @@ npm run check      # syntax-checks the source
 npm start          # starts the server on http://localhost:8787
 ```
 
-Open <http://localhost:8787> and:
+Then open <http://localhost:8787> in any browser. See the next section for
+what to do once it's open and how to reach it from other devices.
 
-1. **Connect Tesla** — completes the OAuth login and stores your tokens locally
-   in `config/tokens.json` (gitignored).
-2. **Discover Sites** — finds your energy site and saves its ID.
-3. On a schedule row, click **Dry Run** to see the exact payloads, then **Run
-   Now** once you're comfortable.
+---
+
+## Using it from the web
+
+The whole app is a normal web page running on the machine that you ran
+`npm start` (or `scripts/restart.sh`) on. Open it in any browser. **Which URL
+to use depends on the Access mode** (set in the *Configure* tab — defaults to
+Localhost):
+
+| Access mode | URL to open | Reachable from |
+|---|---|---|
+| **Localhost** (default) | `http://localhost:8787` <br>or `http://127.0.0.1:8787` | only the machine running the server |
+| **Local network** | `http://<your-machine's-LAN-IP>:8787` <br>(localhost still works on the host itself) | any device on the same Wi-Fi/LAN |
+| **Tailscale** (recommended for remote) | `http://<tailscale-IP>:8787` <br>or `http://<machine-name>:8787` (MagicDNS) <br>or `https://<machine-name>.<tailnet>.ts.net/` (Tailscale Serve) | any device signed into your tailnet |
+| **Public** | the URL of the tunnel/reverse proxy you set up | the public internet, **with a password** |
+
+If a password is set (any mode except localhost should have one), the browser
+prompts for it via HTTP Basic Auth — leave the username blank or type anything,
+and enter your password.
+
+### Finding the URL for your machine
+
+- **Your Mac's LAN IP:** System Settings → Network → click your active
+  connection → it's shown there. Or in a terminal:
+  ```bash
+  ipconfig getifaddr en0   # Wi-Fi (try en1 if that's empty)
+  ```
+- **Your Mac's Tailscale IP / name:** in Terminal:
+  ```bash
+  tailscale ip -4              # e.g. 100.x.y.z
+  tailscale status | head -1   # shows the MagicDNS name
+  ```
+- **Linux:** `hostname -I` for the LAN IP; `tailscale ip -4` same as above.
+
+The Configure tab also shows the **LAN IP and the URL it expects to be reached
+at** for the current mode — easiest place to copy it from.
+
+### What you'll see — quick tour of the tabs
+
+- **Schedules** — view / edit / save the schedule that fires automatically.
+  Click **Save** to install (or update) the scheduled jobs at the OS level.
+- **Net Billing / TOU Cost / Solar Savings** — energy + dollar reports against
+  your TOU rates.
+- **Settings** — what the Powerwall is doing right now, the rate plan in
+  effect, and the **Scheduled jobs** panel that shows exactly which jobs the
+  OS scheduler has installed (verify Save worked).
+- **Rates** — override the rate plan when Tesla's tariff is incomplete.
+- **Configure** — change access mode (Localhost / LAN / Public), set a
+  password, port, timezone. Save & Restart applies it.
+- **Activity** — merged log of scheduled runs and server events, filterable
+  by source.
+
+### First-time flow
+
+1. On the **Schedules** tab, fill in your **Tesla Connection** values
+   (region, client ID/secret, redirect URI, energy site ID — though
+   *Discover Sites* will populate the site ID for you).
+2. Click **Connect Tesla** → log in at Tesla → it redirects back and stores
+   your tokens locally.
+3. Click **Discover Sites** → confirm the right energy site.
+4. Edit a schedule row, click **Dry Run** to see the exact payloads, then
+   **Run Now** once you're comfortable.
+5. Click **Save** to install the scheduled jobs. Open **Settings** → scroll to
+   **Scheduled jobs** to verify they're installed in launchd / cron.
 
 ---
 
@@ -295,6 +365,29 @@ you carry around and close the lid on.
 add the `@reboot` crontab line above; on macOS, run `scripts/restart.sh` from a
 Terminal login item (System Settings → General → Login Items) or wrap it in
 your own LaunchAgent.
+
+---
+
+## Linux (untested)
+
+> **This has never been run or tested on Linux.** It's built and used on
+> macOS. The Linux scheduling backend (cron) and the server itself are written
+> to be portable — no native dependencies, only standard `node`, `bash`, and
+> `crontab` — so it *should* work on a typical Linux box / Raspberry Pi
+> without changes. But nobody has actually run it there yet. Expect rough
+> edges, especially around:
+>
+> - Whether `cron` is installed and running by default on your distro (on
+>   minimal Debian/Ubuntu and most Pi images it is; on Alpine you'd install
+>   `cronie` or `dcron`).
+> - Whether your `cron` daemon picks up changes to the user crontab without a
+>   restart (most do; some need `sudo service cron reload`).
+> - File paths and Node binary location embedded in the cron lines
+>   (`process.execPath` at the time of Save) — if you upgrade Node these may
+>   need a re-save.
+>
+> If you try it and hit something, the fix is usually small. Reports / PRs
+> welcome.
 
 ---
 

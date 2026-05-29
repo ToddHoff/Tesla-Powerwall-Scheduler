@@ -80,9 +80,16 @@ cd Tesla-Powerwall-Scheduler
 
 You'll run every command in the rest of the setup from this directory.
 
-(If you don't have `git`: on macOS install via Xcode Command Line Tools —
-`xcode-select --install` — or download a ZIP from the GitHub page and unzip
-it.)
+Install Node.js (20 or newer) via Homebrew:
+
+```bash
+brew install node
+node --version    # confirm it's v20 or higher
+```
+
+(If you don't have Homebrew, install it first from <https://brew.sh>. If you
+don't have `git`, `brew install git` works too — and as a last resort you can
+download a ZIP from the GitHub page and unzip it.)
 
 ---
 
@@ -167,14 +174,80 @@ hosted public key.
 
 ## Part 2 — Run the app
 
+All the commands below run from the repo directory you cloned into.
+
+### 1. Install dependencies
+
 ```bash
 npm install        # no third-party deps today, but safe to run
 npm run check      # syntax-checks the source
-npm start          # starts the server on http://localhost:8787
 ```
 
-Then open <http://localhost:8787> in any browser. See the next section for
-what to do once it's open and how to reach it from other devices.
+### 2. Start the server
+
+**On macOS — install the LaunchAgent (recommended).** It starts the server at
+login, restarts it if it crashes, and survives reboots:
+
+```bash
+zsh scripts/install-launchd.zsh
+```
+
+That writes `~/Library/LaunchAgents/powerwall-scheduler.plist`, loads it, and
+starts the server in the background. (To uninstall later:
+`zsh scripts/uninstall-launchd.zsh`. To restart after a code change:
+`zsh scripts/restart.zsh`.)
+
+**Alternatives** if you don't want the LaunchAgent:
+- Foreground (server runs in your terminal): `npm start`
+- Background but unsupervised (you re-run if it dies): `scripts/restart.sh`
+
+**On Linux** — just start the server yourself:
+```bash
+scripts/restart.sh
+```
+For auto-start on reboot, add an `@reboot` line to your crontab — see
+[Running it](#running-it) below.
+
+### 3. Open the app
+
+In a browser on the same machine, go to:
+
+```
+http://localhost:8787
+```
+
+(For how to reach it from a phone or another device, see
+[Using it from the web](#using-it-from-the-web).)
+
+### 4. Connect the app to Tesla
+
+In the **Schedules** tab:
+
+1. Fill in **Tesla Connection** on the left:
+   - **Region**, **Client ID**, **Client Secret** — from Part 1.
+   - **Redirect URI** — leave as the default.
+   - **Energy Site ID** — leave blank; the next step fills it in.
+2. Click **Save** to persist those values.
+3. Click **Connect Tesla**. You'll be redirected to Tesla's login, then back to
+   the app. Tokens are stored locally in `config/tokens.json` (gitignored) and
+   never sent anywhere except Tesla.
+4. Click **Discover Sites** and confirm it found your Powerwall.
+
+### 5. Try a schedule, then save it
+
+1. On a schedule row, click **Dry Run** — the app prints the exact Tesla API
+   payloads it *would* send, without sending them.
+2. If it looks right, click **Run Now** to apply those settings to the
+   Powerwall immediately. Verify them on the **Settings** tab.
+3. Click **Save** to install the scheduled jobs at the OS level (launchd on
+   macOS, cron on Linux).
+4. On the **Settings** tab, scroll to **Scheduled jobs** — confirm the jobs
+   are installed and listed.
+
+That's it. The schedule now fires automatically. The rest of the README
+covers the deeper features ([reports](#reports), [rate overrides](#rate-plan-settings--rates),
+[access modes](#network-access-configure-tab), and the always-on host
+requirement under [Running it](#running-it)).
 
 ---
 
@@ -239,18 +312,8 @@ at** for the current mode — easiest place to copy it from.
 - **Activity** — merged log of scheduled runs and server events, filterable
   by source.
 
-### First-time flow
-
-1. On the **Schedules** tab, fill in your **Tesla Connection** values
-   (region, client ID/secret, redirect URI, energy site ID — though
-   *Discover Sites* will populate the site ID for you).
-2. Click **Connect Tesla** → log in at Tesla → it redirects back and stores
-   your tokens locally.
-3. Click **Discover Sites** → confirm the right energy site.
-4. Edit a schedule row, click **Dry Run** to see the exact payloads, then
-   **Run Now** once you're comfortable.
-5. Click **Save** to install the scheduled jobs. Open **Settings** → scroll to
-   **Scheduled jobs** to verify they're installed in launchd / cron.
+First-time setup (filling in Tesla credentials, Connect Tesla, Discover Sites,
+trying a schedule, and saving) is covered in [Part 2 — Run the app](#part-2--run-the-app).
 
 ---
 
@@ -378,19 +441,14 @@ again. The schedule keeps running regardless of whether the server is up.
 
 To have the server come back automatically after a reboot:
 
+- **macOS:** if you installed the LaunchAgent in
+  [Part 2](#part-2--run-the-app), it already auto-starts at login and
+  respawns on crash. Use `zsh scripts/restart.zsh` to restart after a code
+  change.
 - **Linux:** add an `@reboot` line to your crontab:
   ```
   @reboot cd /path/to/repo && node server.mjs >> logs/server.out.log 2>&1
   ```
-- **macOS:** install a supervised LaunchAgent that auto-starts at login and
-  respawns the server if it crashes:
-  ```bash
-  zsh scripts/install-launchd.zsh    # installs ~/Library/LaunchAgents/powerwall-scheduler.plist
-  zsh scripts/restart.zsh            # restart via launchctl kickstart (after install)
-  zsh scripts/uninstall-launchd.zsh  # remove agent + per-step jobs
-  ```
-  Or skip the LaunchAgent and just run `scripts/restart.sh` from Terminal at
-  login.
 
 To remove the scheduled jobs entirely, clear them from the UI by disabling all
 rows and saving — the app cleans up the per-OS scheduler state. (On Linux you

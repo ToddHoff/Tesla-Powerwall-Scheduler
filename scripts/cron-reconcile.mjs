@@ -62,6 +62,10 @@ export async function removeManagedCron() {
   return true;
 }
 
+// Unified names so server.mjs can dispatch by platform without caring which
+// backend it imported.
+export { reconcileCron as reconcile, removeLegacyLaunchd as removeLegacy };
+
 // One-time cleanup for people upgrading from the launchd-based versions:
 // remove the per-step LaunchAgents so they don't double-fire alongside cron.
 // (The always-on server LaunchAgent, if any, is handled by the install docs.)

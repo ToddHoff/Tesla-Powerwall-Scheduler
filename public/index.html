@@ -90,6 +90,15 @@
             <button id="addRow">Add Row</button>
           </div>
 
+          <div id="schedulerStatus" class="scheduler-status">
+            <span id="schedulerStatusLine" class="muted-meta">Checking installed jobs…</span>
+            <button id="schedulerStatusRefresh" type="button" class="link-button">Refresh</button>
+            <details>
+              <summary class="muted-meta">raw</summary>
+              <pre id="schedulerStatusRaw"></pre>
+            </details>
+          </div>
+
           <div class="schedule-switcher" id="scheduleSwitcher"></div>
 
           <div class="table-wrap">

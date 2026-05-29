@@ -5,7 +5,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import { reconcileCron, removeLegacyLaunchd } from './scripts/cron-reconcile.mjs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+// macOS-native scheduling avoids the admin-authorization prompt that crontab
+// modification triggers under Terminal-launched processes; Linux uses cron.
+const schedulerBackendFile = process.platform === 'darwin'
+  ? './scripts/launchd-reconcile.mjs'
+  : './scripts/cron-reconcile.mjs';
+const { reconcile: reconcileSchedule, removeLegacy: removeLegacySchedule } = await import(schedulerBackendFile);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = path.join(__dirname, 'config');
@@ -69,6 +78,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/rates' && req.method === 'GET') return await ratesGet(res);
     if (url.pathname === '/api/rates' && req.method === 'POST') return await ratesPost(req, res);
     if (url.pathname === '/api/logs/clear' && req.method === 'POST') return await clearLogs(req, res);
+    if (url.pathname === '/api/scheduler/status' && req.method === 'GET') return await schedulerStatus(res);
     if (url.pathname.startsWith('/api/run/') && req.method === 'POST') return await runManual(url, res);
     if (url.pathname === '/auth/login' && req.method === 'GET') return await startTeslaLogin(res);
     if (url.pathname === '/auth/callback' && req.method === 'GET') return await finishTeslaLogin(url, res);
@@ -324,13 +334,13 @@ async function saveConfig(req, res) {
   await writeJson(SETTINGS_PATH, localSettings);
   await logEvent('info', 'config_saved', { rows: next.schedule.length });
 
-  const cron = await reconcileSafe(activeSchedule(normalizedIncoming));
-  return sendJson(res, { ...(await getPublicConfig()), cron });
+  const scheduler = await reconcileSafe(activeSchedule(normalizedIncoming));
+  return sendJson(res, { ...(await getPublicConfig()), scheduler });
 }
 
 async function reconcileSafe(schedule) {
   try {
-    const result = await reconcileCron({
+    const result = await reconcileSchedule({
       schedule,
       appDir: __dirname,
       nodeBin: process.execPath,
@@ -338,17 +348,17 @@ async function reconcileSafe(schedule) {
       knownSignature: installedCronSignature
     });
     if (result.signature != null) installedCronSignature = result.signature;
-    await logEvent('info', 'cron_reconciled', result);
+    await logEvent('info', 'schedule_reconciled', { backend: process.platform === 'darwin' ? 'launchd' : 'cron', ...result });
     return { ok: true, ...result };
   } catch (error) {
-    await logEvent('error', 'cron_reconcile_failed', { message: error.message });
+    await logEvent('error', 'schedule_reconcile_failed', { message: error.message });
     return { ok: false, error: error.message };
   }
 }
 
 async function migrateAndReconcileOnStartup() {
-  const removed = await removeLegacyLaunchd();
-  if (removed) await logEvent('info', 'legacy_launchd_removed', {});
+  const removed = await removeLegacySchedule();
+  if (removed) await logEvent('info', 'legacy_scheduler_removed', {});
   const config = await readConfig();
   await reconcileSafe(activeSchedule(config));
 }
@@ -1824,6 +1834,81 @@ async function clearLogs(req, res) {
   }
   await logEvent('info', 'logs_cleared', { source, cleared });
   return sendJson(res, { ok: true, source, cleared });
+}
+
+// Read what the OS scheduler actually has installed for us — so the UI can
+// verify a Save took effect at the launchd/cron level, not just in our config.
+async function schedulerStatus(res) {
+  if (process.platform === 'darwin') return await launchdStatus(res);
+  return await cronStatus(res);
+}
+
+async function launchdStatus(res) {
+  try {
+    const { stdout } = await execFileAsync('/bin/launchctl', ['list']);
+    const jobs = [];
+    const rawLines = [];
+    for (const line of stdout.split('\n')) {
+      const cols = line.split('\t');
+      if (cols.length < 3) continue;
+      const label = cols[2].trim();
+      if (!label.startsWith('powerwall-scheduler.step.')) continue;
+      rawLines.push(line);
+      const hhmm = label.slice('powerwall-scheduler.step.'.length);
+      if (!/^\d{4}$/.test(hhmm)) continue;
+      jobs.push({
+        label,
+        time: `${hhmm.slice(0, 2)}:${hhmm.slice(2, 4)}`,
+        pid: cols[0].trim(),
+        lastExit: cols[1].trim()
+      });
+    }
+    jobs.sort((a, b) => a.time.localeCompare(b.time));
+    return sendJson(res, { backend: 'launchd', jobs, raw: rawLines.join('\n') });
+  } catch (error) {
+    return sendJson(res, { backend: 'launchd', jobs: [], raw: '', error: error.message }, 500);
+  }
+}
+
+async function cronStatus(res) {
+  let stdout = '';
+  try {
+    ({ stdout } = await execFileAsync('crontab', ['-l']));
+  } catch {
+    // No crontab installed → no jobs, not an error.
+    return sendJson(res, { backend: 'cron', jobs: [], raw: '' });
+  }
+  const lines = stdout.split('\n');
+  const block = [];
+  let inBlock = false;
+  for (const line of lines) {
+    const t = line.trim();
+    if (t === '# >>> powerwall-scheduler >>>') { inBlock = true; continue; }
+    if (t === '# <<< powerwall-scheduler <<<') { inBlock = false; continue; }
+    if (inBlock) block.push(line);
+  }
+  const jobs = [];
+  for (const line of block) {
+    const m = line.match(/^(\d+)\s+(\d+)\s+\*\s+\*\s+\*\s+.+--step\s+'([^']+)'/);
+    if (!m) continue;
+    let minute = Number(m[1]);
+    let hour = Number(m[2]);
+    // Recover the step's scheduled time by undoing the +1 min trigger offset.
+    minute -= 1;
+    if (minute < 0) {
+      minute += 60;
+      hour = (hour + 23) % 24;
+    }
+    const time = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    jobs.push({
+      label: `cron@${time}`,
+      time,
+      id: m[3],
+      schedule: `${m[1]} ${m[2]} * * *`
+    });
+  }
+  jobs.sort((a, b) => a.time.localeCompare(b.time));
+  return sendJson(res, { backend: 'cron', jobs, raw: block.join('\n') });
 }
 
 async function logEvent(level, event, details) {

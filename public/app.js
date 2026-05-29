@@ -63,6 +63,9 @@ const els = {
   scheduleRows: document.querySelector('#scheduleRows'),
   rowTemplate: document.querySelector('#rowTemplate'),
   addRow: document.querySelector('#addRow'),
+  schedulerStatusLine: document.querySelector('#schedulerStatusLine'),
+  schedulerStatusRefresh: document.querySelector('#schedulerStatusRefresh'),
+  schedulerStatusRaw: document.querySelector('#schedulerStatusRaw'),
   copyShareText: document.querySelector('#copyShareText'),
   shareText: document.querySelector('#shareText'),
   shareStatus: document.querySelector('#shareStatus'),
@@ -124,17 +127,18 @@ els.saveConfig.addEventListener('click', async () => {
     pendingText: 'Saving...',
     successText: 'Saved',
     statusEl: els.operationStatus,
-    pendingMessage: 'Saving configuration and updating cron jobs...',
+    pendingMessage: 'Saving configuration and updating scheduled jobs...',
     task: async () => {
       config = collectConfig();
       const saved = await api('/api/config', { method: 'POST', body: config });
-      const { cron, ...nextConfig } = saved;
+      const { scheduler, ...nextConfig } = saved;
       config = nextConfig;
       selectedScheduleId = selectedScheduleId || config.activeScheduleId;
       render();
       await refreshStatus();
-      const summary = summarizeCron(cron);
-      setStatus(els.operationStatus, `Configuration saved. ${summary}`, cron?.ok === false ? 'error' : 'success');
+      const summary = summarizeSchedule(scheduler);
+      await refreshSchedulerStatus();
+      setStatus(els.operationStatus, `Configuration saved. ${summary}`, scheduler?.ok === false ? 'error' : 'success');
     }
   });
 });
@@ -270,6 +274,37 @@ els.copyShareText.addEventListener('click', async () => {
 });
 
 els.refreshStatus.addEventListener('click', refreshStatus);
+els.schedulerStatusRefresh.addEventListener('click', refreshSchedulerStatus);
+
+async function refreshSchedulerStatus() {
+  try {
+    const result = await api('/api/scheduler/status');
+    renderSchedulerStatus(result);
+  } catch (error) {
+    els.schedulerStatusLine.textContent = `Scheduler check failed: ${error.message}`;
+    els.schedulerStatusLine.className = 'warn';
+  }
+}
+
+function renderSchedulerStatus(result) {
+  const backend = result?.backend || 'unknown';
+  const jobs = result?.jobs || [];
+  if (result?.error) {
+    els.schedulerStatusLine.textContent = `${backend}: ${result.error}`;
+    els.schedulerStatusLine.className = 'warn';
+  } else if (!jobs.length) {
+    els.schedulerStatusLine.textContent = `${backend}: no jobs installed.`;
+    els.schedulerStatusLine.className = 'warn';
+  } else {
+    const times = jobs.map(j => j.time).join(', ');
+    els.schedulerStatusLine.textContent = `✓ ${backend}: ${jobs.length} job${jobs.length === 1 ? '' : 's'} installed (${times}).`;
+    els.schedulerStatusLine.className = 'ok';
+  }
+  els.schedulerStatusRaw.textContent = result?.raw || '(no raw output)';
+}
+
+// Initial fetch on load + after every Save / Activate (the save handlers call this).
+refreshSchedulerStatus();
 
 els.logOrderToggle.addEventListener('click', () => {
   logOrder = logOrder === 'desc' ? 'asc' : 'desc';
@@ -541,17 +576,18 @@ function renderScheduleSwitcher() {
         pendingText: 'Activating...',
         successText: 'Active',
         statusEl: els.operationStatus,
-        pendingMessage: `Activating ${schedule.name} and updating cron jobs...`,
+        pendingMessage: `Activating ${schedule.name} and updating scheduled jobs...`,
         task: async () => {
           config.activeScheduleId = schedule.id;
           selectedScheduleId = schedule.id;
           const saved = await api('/api/config', { method: 'POST', body: collectConfig() });
-          const { cron, ...nextConfig } = saved;
+          const { scheduler, ...nextConfig } = saved;
           config = nextConfig;
           render();
           await refreshStatus();
-          const summary = summarizeCron(cron);
-          setStatus(els.operationStatus, `${schedule.name} is now active. ${summary}`, cron?.ok === false ? 'error' : 'success');
+          const summary = summarizeSchedule(scheduler);
+      await refreshSchedulerStatus();
+          setStatus(els.operationStatus, `${schedule.name} is now active. ${summary}`, scheduler?.ok === false ? 'error' : 'success');
         }
       });
     });
@@ -1549,13 +1585,13 @@ function setStatus(element, message, state) {
   element.classList.add(state);
 }
 
-function summarizeCron(cron) {
-  if (!cron) return '';
-  if (cron.ok === false) return `Cron update failed: ${cron.error || 'unknown error'}`;
-  const jobs = cron.jobs || [];
-  if (!jobs.length) return 'Cron: no scheduled jobs.';
+function summarizeSchedule(result) {
+  if (!result) return '';
+  if (result.ok === false) return `Schedule update failed: ${result.error || 'unknown error'}`;
+  const jobs = result.jobs || [];
+  if (!jobs.length) return 'No scheduled jobs.';
   const times = jobs.map(j => j.time).join(', ');
-  return `Cron: ${jobs.length} job${jobs.length === 1 ? '' : 's'} scheduled (${times}).`;
+  return `${jobs.length} job${jobs.length === 1 ? '' : 's'} scheduled (${times}).`;
 }
 
 // ---- Rates tab -------------------------------------------------------------

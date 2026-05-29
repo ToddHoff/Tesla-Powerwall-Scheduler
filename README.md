@@ -39,11 +39,12 @@ actual PG&E bill.
 
 ## Requirements
 
-- **macOS or Linux.** Scheduling uses `cron`, which both have.
+- **macOS or Linux.** macOS uses `launchd` per-user agents; Linux uses `cron`.
+  The backend is picked automatically.
 - **Node.js 20+** (`node --version`).
-- A computer that **stays on 24/7**. Scheduled changes run from cron, which
-  does not run — and does not wake the machine — while it's asleep, so a
-  sleeping or shut-down machine misses them. See
+- A computer that **stays on 24/7**. Neither launchd nor cron runs (or wakes
+  the machine) while it's asleep, so a sleeping or shut-down machine misses
+  scheduled changes. See
   [The computer must be ALWAYS ON](#️-the-computer-must-be-always-on).
 - A **Powerwall** (or Solar + Powerwall) on your Tesla account.
 - A **domain you control with HTTPS** — Tesla's Fleet API requires you to host a
@@ -160,40 +161,31 @@ Each row applies four settings at its time:
 Multiple schedules (e.g. Summer/Winter) live under one config; **Activate** the
 one you want. Only the active schedule runs. Switch seasons manually.
 
-When you **Save**, the app rewrites a managed block in your `crontab` — one
-cron job per enabled row, fired one minute past the row's time — and removes
-jobs for rows you deleted. It only touches the lines between its own
-`# >>> powerwall-scheduler >>>` markers, leaving any other cron entries alone.
-The save status shows the scheduled times.
+When you **Save**, the app installs one scheduled job per enabled row, fired
+one minute past the row's time, and removes jobs for rows you deleted. The save
+status shows the scheduled times.
 
-The app only writes crontab when the *times* actually change (or at startup),
-so saving rate/setting tweaks won't touch it.
+**The scheduler used depends on the OS:**
 
-#### macOS: stop the Full Disk Access prompt
+| OS | Backend | Job files |
+|---|---|---|
+| **macOS** | `launchd` per-user agents | `~/Library/LaunchAgents/powerwall-scheduler.step.<HHMM>.plist` |
+| **Linux** | `cron` | a marked block in your user `crontab` |
 
-On macOS, any process that modifies your crontab triggers a Full Disk Access
-prompt, because the crontab lives in a system-protected directory. You'll see
-it whenever the schedule's times change. To grant access permanently so it
-stops prompting:
+The split is automatic (chosen by `process.platform`). It exists because macOS
+treats a Terminal-launched process modifying the crontab as "administering the
+computer" and pops up an authorization prompt on every change — launchd has no
+such prompt and is the native scheduler on macOS anyway. The Linux side uses
+cron because it's universally available and prompt-free there.
 
-1. Find the exact Node binary the server runs as:
-   ```bash
-   readlink -f "$(which node)"     # e.g. /opt/homebrew/Cellar/node@20/20.18.3/bin/node
-   ```
-2. System Settings → **Privacy & Security** → **Full Disk Access** (not "Files
-   and Folders" — the crontab is outside those folders).
-3. Click **+**, press **⌘⇧G**, paste the path from step 1, select the `node`
-   file, **Add** it, and toggle it **ON** (Touch ID / admin password to confirm).
-4. Restart the server: `scripts/restart.sh`.
-
-> **Caveat:** that path is version-pinned. After `brew upgrade node` the real
-> path changes and the grant no longer matches, so prompts return until you
-> re-add the new path. (Adding the `/opt/homebrew/opt/node@20/bin/node` symlink
-> doesn't help — macOS resolves it to the versioned path for this check.)
+> On Linux the app only touches the lines between its own
+> `# >>> powerwall-scheduler >>>` markers in your crontab, leaving any other
+> cron entries alone. It only rewrites the block when the step *times* actually
+> change, not on every save.
 
 ### How scheduled runs work
 
-Each cron job runs `scripts/run-due.mjs --step <id>`, which:
+Each scheduled job runs `scripts/run-due.mjs --step <id>`, which:
 
 1. POSTs the row's backup / operation / grid‑import‑export settings.
 2. Waits ~45 s for the gateway to settle.
@@ -226,9 +218,10 @@ only — they don't change what the Powerwall does.
 
 ## Running it
 
-Scheduled battery changes run from **cron** and need nothing running in the
-background — cron invokes `scripts/run-due.mjs` directly at each time. The
-server is only for the **web UI and reports**.
+Scheduled battery changes are fired by the OS scheduler (launchd on macOS,
+cron on Linux) and need nothing running in the background — each scheduled job
+invokes `scripts/run-due.mjs` directly at its time. The server is only for the
+**web UI and reports**.
 
 Start (or restart) the server in the background:
 
@@ -240,25 +233,40 @@ It backgrounds `node server.mjs`, logging to `logs/server.out.log`. Run
 `npm start` instead if you'd rather keep it in the foreground.
 
 The server is **not supervised** — if it crashes, just run `scripts/restart.sh`
-again. The schedule keeps running from cron regardless of whether the server is
-up. To have it come back after a reboot, add an `@reboot` line to your crontab:
+again. The schedule keeps running regardless of whether the server is up.
 
-```
-@reboot cd /path/to/repo && node server.mjs >> logs/server.out.log 2>&1
-```
+To have the server come back automatically after a reboot:
 
-To remove the scheduled jobs, edit your crontab (`crontab -e`) and delete the
-`# >>> powerwall-scheduler >>>` … `# <<<` block, or clear it from the UI by
-disabling all rows and saving.
+- **Linux:** add an `@reboot` line to your crontab:
+  ```
+  @reboot cd /path/to/repo && node server.mjs >> logs/server.out.log 2>&1
+  ```
+- **macOS:** install a supervised LaunchAgent that auto-starts at login and
+  respawns the server if it crashes:
+  ```bash
+  zsh scripts/install-launchd.zsh    # installs ~/Library/LaunchAgents/powerwall-scheduler.plist
+  zsh scripts/restart.zsh            # restart via launchctl kickstart (after install)
+  zsh scripts/uninstall-launchd.zsh  # remove agent + per-step jobs
+  ```
+  Or skip the LaunchAgent and just run `scripts/restart.sh` from Terminal at
+  login.
+
+To remove the scheduled jobs entirely, clear them from the UI by disabling all
+rows and saving — the app cleans up the per-OS scheduler state. (On Linux you
+can also edit your crontab `crontab -e` and delete the
+`# >>> powerwall-scheduler >>>` … `# <<<` block by hand; on macOS, remove the
+`~/Library/LaunchAgents/powerwall-scheduler.step.*.plist` files.)
 
 ### ⚠️ The computer must be ALWAYS ON
 
-**This is the single most important requirement.** cron does not run while the
-machine is asleep, and it does **not** wake the machine to run a job — a missed
-time is simply skipped. If your Mac sleeps at midnight, the midnight battery
-change never happens. So the computer running this **must stay awake 24/7**
-(the display can sleep — only *system* sleep matters), and stay connected to
-the network.
+**This is the single most important requirement.** Neither launchd (macOS) nor
+cron (Linux) runs while the machine is asleep, and neither wakes it for a job —
+a missed time is simply skipped. (launchd does run a calendar job *once* on
+wake if it was missed, but the setting would arrive late — possibly hours
+late — which for "off-peak begins at midnight" is worse than skipping.) Either
+way, if your Mac sleeps at midnight, the midnight battery change never happens
+on time. So the computer running this **must stay awake 24/7** (the display
+can sleep — only *system* sleep matters), and stay connected to the network.
 
 Best option: run it on a **dedicated always-on machine** — a Mac mini, an old
 laptop left plugged in, a Linux mini-PC, or a Raspberry Pi. Don't use a laptop
@@ -283,8 +291,10 @@ you carry around and close the lid on.
   `HandleLidSwitch=ignore` in `/etc/systemd/logind.conf`, then
   `sudo systemctl restart systemd-logind`.
 
-**Either way:** pair this with the `@reboot` crontab line above so the server
-also comes back after a power blip or reboot.
+**Either way:** also set the **server** to come back after a reboot — on Linux
+add the `@reboot` crontab line above; on macOS, run `scripts/restart.sh` from a
+Terminal login item (System Settings → General → Login Items) or wrap it in
+your own LaunchAgent.
 
 ---
 

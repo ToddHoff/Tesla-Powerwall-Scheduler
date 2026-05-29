@@ -15,7 +15,11 @@ actual PG&E bill.
 
 ---
 
-<img width="2000" height="1488" alt="Image" src="https://github.com/user-attachments/assets/82507d00-db59-4c33-92a4-571dd2192f21" />
+<img width="1000" height="744" alt="Image" src="https://github.com/user-attachments/assets/82507d00-db59-4c33-92a4-571dd2192f21" />
+
+---
+
+<img width="1000" height="744" alt="Image" src="https://github.com/user-attachments/assets/00a8673c-c58d-431a-a4f4-d092697cfd1b" />
 
 ## Features
 

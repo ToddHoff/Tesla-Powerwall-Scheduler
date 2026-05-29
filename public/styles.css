@@ -96,6 +96,17 @@ textarea {
   padding: 9px 10px;
 }
 
+/* Checkboxes/radios are native controls — never stretch them to 100% width. */
+input[type="radio"],
+input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 0;
+  flex: 0 0 auto;
+}
+
 textarea {
   resize: vertical;
   min-width: 190px;
@@ -494,6 +505,7 @@ button.add-period:hover {
 }
 
 .config-checkbox {
+  display: flex;
   flex-direction: row;
   align-items: center;
   gap: 6px;

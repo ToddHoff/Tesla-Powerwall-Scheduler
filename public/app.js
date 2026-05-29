@@ -107,6 +107,7 @@ const els = {
   refreshStatus: document.querySelector('#refreshStatus'),
   logOrderToggle: document.querySelector('#logOrderToggle'),
   logSourceFilter: document.querySelector('#logSourceFilter'),
+  clearLogs: document.querySelector('#clearLogs'),
   logOutput: document.querySelector('#logOutput')
 };
 
@@ -123,17 +124,17 @@ els.saveConfig.addEventListener('click', async () => {
     pendingText: 'Saving...',
     successText: 'Saved',
     statusEl: els.operationStatus,
-    pendingMessage: 'Saving configuration and reloading launchd jobs...',
+    pendingMessage: 'Saving configuration and updating cron jobs...',
     task: async () => {
       config = collectConfig();
       const saved = await api('/api/config', { method: 'POST', body: config });
-      const { launchd, ...nextConfig } = saved;
+      const { cron, ...nextConfig } = saved;
       config = nextConfig;
       selectedScheduleId = selectedScheduleId || config.activeScheduleId;
       render();
       await refreshStatus();
-      const summary = summarizeLaunchd(launchd);
-      setStatus(els.operationStatus, `Configuration saved. ${summary}`, launchd?.ok === false ? 'error' : 'success');
+      const summary = summarizeCron(cron);
+      setStatus(els.operationStatus, `Configuration saved. ${summary}`, cron?.ok === false ? 'error' : 'success');
     }
   });
 });
@@ -280,6 +281,24 @@ updateLogOrderToggle();
 els.logSourceFilter.addEventListener('change', () => {
   logSourceFilter = els.logSourceFilter.value || 'all';
   renderLogs();
+});
+
+els.clearLogs.addEventListener('click', async () => {
+  const source = logSourceFilter || 'all';
+  const what = source === 'all' ? 'all logs' : `the "${source}" log`;
+  if (!window.confirm(`Clear ${what}? This can't be undone.`)) return;
+  await runWithFeedback({
+    buttons: [els.clearLogs],
+    pendingText: 'Clearing...',
+    successText: 'Clear',
+    statusEl: els.operationStatus,
+    pendingMessage: `Clearing ${what}...`,
+    successMessage: `Cleared ${what}.`,
+    task: async () => {
+      await api('/api/logs/clear', { method: 'POST', body: { source } });
+      await refreshStatus();
+    }
+  });
 });
 
 els.settingsRefresh.addEventListener('click', refreshSettings);
@@ -522,17 +541,17 @@ function renderScheduleSwitcher() {
         pendingText: 'Activating...',
         successText: 'Active',
         statusEl: els.operationStatus,
-        pendingMessage: `Activating ${schedule.name} and reloading launchd jobs...`,
+        pendingMessage: `Activating ${schedule.name} and updating cron jobs...`,
         task: async () => {
           config.activeScheduleId = schedule.id;
           selectedScheduleId = schedule.id;
           const saved = await api('/api/config', { method: 'POST', body: collectConfig() });
-          const { launchd, ...nextConfig } = saved;
+          const { cron, ...nextConfig } = saved;
           config = nextConfig;
           render();
           await refreshStatus();
-          const summary = summarizeLaunchd(launchd);
-          setStatus(els.operationStatus, `${schedule.name} is now active. ${summary}`, launchd?.ok === false ? 'error' : 'success');
+          const summary = summarizeCron(cron);
+          setStatus(els.operationStatus, `${schedule.name} is now active. ${summary}`, cron?.ok === false ? 'error' : 'success');
         }
       });
     });
@@ -1530,15 +1549,13 @@ function setStatus(element, message, state) {
   element.classList.add(state);
 }
 
-function summarizeLaunchd(launchd) {
-  if (!launchd) return '';
-  if (launchd.ok === false) return `Launchd reload failed: ${launchd.error || 'unknown error'}`;
-  const parts = [];
-  if (launchd.added?.length) parts.push(`+${launchd.added.length} added`);
-  if (launchd.updated?.length) parts.push(`~${launchd.updated.length} updated`);
-  if (launchd.removed?.length) parts.push(`-${launchd.removed.length} removed`);
-  if (launchd.unchanged?.length && parts.length === 0) parts.push(`${launchd.unchanged.length} unchanged`);
-  return parts.length ? `Launchd: ${parts.join(', ')}.` : 'Launchd: no jobs.';
+function summarizeCron(cron) {
+  if (!cron) return '';
+  if (cron.ok === false) return `Cron update failed: ${cron.error || 'unknown error'}`;
+  const jobs = cron.jobs || [];
+  if (!jobs.length) return 'Cron: no scheduled jobs.';
+  const times = jobs.map(j => j.time).join(', ');
+  return `Cron: ${jobs.length} job${jobs.length === 1 ? '' : 's'} scheduled (${times}).`;
 }
 
 // ---- Rates tab -------------------------------------------------------------
@@ -1961,7 +1978,7 @@ els.configSave.addEventListener('click', async () => {
       const target = `${window.location.protocol}//${host}:${newPort}`;
       setStatus(els.configStatus, `Saved. Restarting server on ${mode} / port ${newPort}... reconnecting to ${target}`, 'pending');
 
-      // Fire the restart (server exits; launchd respawns). Then poll until it's back.
+      // Fire the restart (server exits and respawns a detached copy). Poll until it's back.
       await api('/api/restart', { method: 'POST' }).catch(() => {});
       await waitForServerBack(target);
     }

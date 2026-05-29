@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import { reconcileLaunchd, removeLegacyPlist } from './scripts/launchd-reconcile.mjs';
+import { reconcileCron, removeLegacyLaunchd } from './scripts/cron-reconcile.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = path.join(__dirname, 'config');
@@ -39,6 +39,7 @@ const env = await loadEnvFile(path.join(__dirname, '.env'));
 const serverSettings = await resolveServerSettings(env);
 const port = serverSettings.port;
 let lastGoodAuthHeader = null;
+let installedCronSignature = null;
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -67,6 +68,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/reports/solar-savings' && req.method === 'GET') return await solarSavingsReport(url, res);
     if (url.pathname === '/api/rates' && req.method === 'GET') return await ratesGet(res);
     if (url.pathname === '/api/rates' && req.method === 'POST') return await ratesPost(req, res);
+    if (url.pathname === '/api/logs/clear' && req.method === 'POST') return await clearLogs(req, res);
     if (url.pathname.startsWith('/api/run/') && req.method === 'POST') return await runManual(url, res);
     if (url.pathname === '/auth/login' && req.method === 'GET') return await startTeslaLogin(res);
     if (url.pathname === '/auth/callback' && req.method === 'GET') return await finishTeslaLogin(url, res);
@@ -212,8 +214,15 @@ async function serverConfigPost(req, res) {
 async function restartServer(res) {
   sendJson(res, { ok: true, restarting: true });
   await logEvent('info', 'server_restart_requested', {});
-  // Exit cleanly; the LaunchAgent (KeepAlive) respawns us with the new config.
-  setTimeout(() => process.exit(0), 150);
+  // No supervisor anymore, so respawn ourselves: launch a detached copy that
+  // waits ~2s for this process to exit and free the port, then exit. The child
+  // outlives us (detached + unref). Works the same on macOS and Linux.
+  const { spawn } = await import('node:child_process');
+  const q = value => `"${String(value).replace(/(["\\$`])/g, '\\$1')}"`;
+  const logFile = path.join(LOG_DIR, 'server.out.log');
+  const cmd = `sleep 2; exec ${q(process.execPath)} ${q(path.join(__dirname, 'server.mjs'))} >> ${q(logFile)} 2>&1`;
+  spawn('/bin/sh', ['-c', cmd], { cwd: __dirname, detached: true, stdio: 'ignore' }).unref();
+  setTimeout(() => process.exit(0), 200);
 }
 
 async function loadEnvFile(filePath) {
@@ -315,29 +324,31 @@ async function saveConfig(req, res) {
   await writeJson(SETTINGS_PATH, localSettings);
   await logEvent('info', 'config_saved', { rows: next.schedule.length });
 
-  const launchd = await reconcileSafe(activeSchedule(normalizedIncoming));
-  return sendJson(res, { ...(await getPublicConfig()), launchd });
+  const cron = await reconcileSafe(activeSchedule(normalizedIncoming));
+  return sendJson(res, { ...(await getPublicConfig()), cron });
 }
 
 async function reconcileSafe(schedule) {
   try {
-    const result = await reconcileLaunchd({
+    const result = await reconcileCron({
       schedule,
       appDir: __dirname,
       nodeBin: process.execPath,
-      logDir: LOG_DIR
+      logDir: LOG_DIR,
+      knownSignature: installedCronSignature
     });
-    await logEvent('info', 'launchd_reconciled', result);
+    if (result.signature != null) installedCronSignature = result.signature;
+    await logEvent('info', 'cron_reconciled', result);
     return { ok: true, ...result };
   } catch (error) {
-    await logEvent('error', 'launchd_reconcile_failed', { message: error.message });
+    await logEvent('error', 'cron_reconcile_failed', { message: error.message });
     return { ok: false, error: error.message };
   }
 }
 
 async function migrateAndReconcileOnStartup() {
-  const removed = await removeLegacyPlist();
-  if (removed) await logEvent('info', 'legacy_plist_removed', {});
+  const removed = await removeLegacyLaunchd();
+  if (removed) await logEvent('info', 'legacy_launchd_removed', {});
   const config = await readConfig();
   await reconcileSafe(activeSchedule(config));
 }
@@ -1781,6 +1792,38 @@ async function getRecentLogs() {
 
   all.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
   return all.slice(-200);
+}
+
+async function clearLogs(req, res) {
+  const body = await readRequestJson(req).catch(() => ({}));
+  const source = typeof body.source === 'string' ? body.source : 'all';
+
+  const targets = [];
+  if (source === 'all' || source === 'server') {
+    targets.push(LOG_PATH);
+  }
+  if (source === 'all') {
+    if (existsSync(LOG_DIR)) {
+      for (const name of await readdir(LOG_DIR)) {
+        if (/^run-\d{4}\.log$/.test(name)) targets.push(path.join(LOG_DIR, name));
+      }
+    }
+  } else if (source.startsWith('step ')) {
+    const m = source.slice(5).match(/^(\d{2}):(\d{2})$/);
+    if (!m) return sendJson(res, { ok: false, error: 'Invalid source.' }, 400);
+    targets.push(path.join(LOG_DIR, `run-${m[1]}${m[2]}.log`));
+  } else if (source !== 'server' && source !== 'all') {
+    return sendJson(res, { ok: false, error: 'Invalid source.' }, 400);
+  }
+
+  const cleared = [];
+  for (const filePath of targets) {
+    if (!existsSync(filePath)) continue;
+    await writeFile(filePath, '');
+    cleared.push(path.basename(filePath));
+  }
+  await logEvent('info', 'logs_cleared', { source, cleared });
+  return sendJson(res, { ok: true, source, cleared });
 }
 
 async function logEvent(level, event, details) {

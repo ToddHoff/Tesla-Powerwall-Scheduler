@@ -89,7 +89,7 @@ async function runStep(stepId, { dryRun }) {
   LOG_PATH = path.join(LOG_DIR, `run-${step.time.replace(':', '')}.log`);
 
   await logEvent('info', 'step_start', {
-    source: 'launchd',
+    source: 'cron',
     scheduleId: schedule.id,
     id: step.id,
     time: step.time,

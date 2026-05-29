@@ -1,6 +1,6 @@
 # Tesla Powerwall Scheduler
 
-A local web app (macOS) that automates your Powerwall settings through Tesla's
+A local web app (macOS / Linux) that automates your Powerwall settings through Tesla's
 Fleet API. You define a daily schedule — backup reserve, operating mode, energy
 exports, and grid charging — and the app applies it at the right times, **reads
 the setting back to confirm it actually took**, and retries if it didn't.
@@ -39,8 +39,12 @@ actual PG&E bill.
 
 ## Requirements
 
-- **macOS** (uses `launchd` for scheduling and an always‑on server).
+- **macOS or Linux.** Scheduling uses `cron`, which both have.
 - **Node.js 20+** (`node --version`).
+- A computer that **stays on 24/7**. Scheduled changes run from cron, which
+  does not run — and does not wake the machine — while it's asleep, so a
+  sleeping or shut-down machine misses them. See
+  [The computer must be ALWAYS ON](#️-the-computer-must-be-always-on).
 - A **Powerwall** (or Solar + Powerwall) on your Tesla account.
 - A **domain you control with HTTPS** — Tesla's Fleet API requires you to host a
   public key at a well‑known URL on your own domain. (A static host like GitHub
@@ -156,13 +160,40 @@ Each row applies four settings at its time:
 Multiple schedules (e.g. Summer/Winter) live under one config; **Activate** the
 one you want. Only the active schedule runs. Switch seasons manually.
 
-When you **Save**, the app installs one `launchd` job per enabled row (fired one
-minute past the row's time) and removes jobs for rows you deleted. The save
-status shows what changed (`+1 added, ~1 updated, -1 removed`).
+When you **Save**, the app rewrites a managed block in your `crontab` — one
+cron job per enabled row, fired one minute past the row's time — and removes
+jobs for rows you deleted. It only touches the lines between its own
+`# >>> powerwall-scheduler >>>` markers, leaving any other cron entries alone.
+The save status shows the scheduled times.
+
+The app only writes crontab when the *times* actually change (or at startup),
+so saving rate/setting tweaks won't touch it.
+
+#### macOS: stop the Full Disk Access prompt
+
+On macOS, any process that modifies your crontab triggers a Full Disk Access
+prompt, because the crontab lives in a system-protected directory. You'll see
+it whenever the schedule's times change. To grant access permanently so it
+stops prompting:
+
+1. Find the exact Node binary the server runs as:
+   ```bash
+   readlink -f "$(which node)"     # e.g. /opt/homebrew/Cellar/node@20/20.18.3/bin/node
+   ```
+2. System Settings → **Privacy & Security** → **Full Disk Access** (not "Files
+   and Folders" — the crontab is outside those folders).
+3. Click **+**, press **⌘⇧G**, paste the path from step 1, select the `node`
+   file, **Add** it, and toggle it **ON** (Touch ID / admin password to confirm).
+4. Restart the server: `scripts/restart.sh`.
+
+> **Caveat:** that path is version-pinned. After `brew upgrade node` the real
+> path changes and the grant no longer matches, so prompts return until you
+> re-add the new path. (Adding the `/opt/homebrew/opt/node@20/bin/node` symlink
+> doesn't help — macOS resolves it to the versioned path for this check.)
 
 ### How scheduled runs work
 
-Each per‑time `launchd` job runs `scripts/run-due.mjs --step <id>`, which:
+Each cron job runs `scripts/run-due.mjs --step <id>`, which:
 
 1. POSTs the row's backup / operation / grid‑import‑export settings.
 2. Waits ~45 s for the gateway to settle.
@@ -193,37 +224,109 @@ only — they don't change what the Powerwall does.
 
 ---
 
-## Run in the background
+## Running it
 
-Install the always‑on server as a `launchd` agent so it starts at login and
-restarts itself if it crashes or after the Mac wakes:
+Scheduled battery changes run from **cron** and need nothing running in the
+background — cron invokes `scripts/run-due.mjs` directly at each time. The
+server is only for the **web UI and reports**.
 
-```bash
-zsh scripts/install-launchd.zsh
-```
-
-Restart it after a code change:
+Start (or restart) the server in the background:
 
 ```bash
-zsh scripts/restart.zsh
+scripts/restart.sh
 ```
 
-Uninstall it (and its scheduled jobs):
+It backgrounds `node server.mjs`, logging to `logs/server.out.log`. Run
+`npm start` instead if you'd rather keep it in the foreground.
 
-```bash
-zsh scripts/uninstall-launchd.zsh
+The server is **not supervised** — if it crashes, just run `scripts/restart.sh`
+again. The schedule keeps running from cron regardless of whether the server is
+up. To have it come back after a reboot, add an `@reboot` line to your crontab:
+
+```
+@reboot cd /path/to/repo && node server.mjs >> logs/server.out.log 2>&1
 ```
 
-The Mac must be awake and online when a scheduled change is due. `launchd`'s
-calendar jobs will wake the Mac to fire them, but if the Mac is fully shut down
-a scheduled change is missed.
+To remove the scheduled jobs, edit your crontab (`crontab -e`) and delete the
+`# >>> powerwall-scheduler >>>` … `# <<<` block, or clear it from the UI by
+disabling all rows and saving.
+
+### ⚠️ The computer must be ALWAYS ON
+
+**This is the single most important requirement.** cron does not run while the
+machine is asleep, and it does **not** wake the machine to run a job — a missed
+time is simply skipped. If your Mac sleeps at midnight, the midnight battery
+change never happens. So the computer running this **must stay awake 24/7**
+(the display can sleep — only *system* sleep matters), and stay connected to
+the network.
+
+Best option: run it on a **dedicated always-on machine** — a Mac mini, an old
+laptop left plugged in, a Linux mini-PC, or a Raspberry Pi. Don't use a laptop
+you carry around and close the lid on.
+
+**Keep a Mac awake**
+- System Settings → **Battery** (or **Energy Saver** on desktops / when plugged
+  in) → turn **off** "Put hard disks to sleep" and set the sleep timer so the
+  computer never sleeps. On laptops, also enable "Prevent automatic sleeping
+  when the display is off" / keep it plugged in.
+- A laptop still sleeps when you **close the lid**. To prevent that you need an
+  external display/keyboard (clamshell) or a tool like Amphetamine (Mac App
+  Store). For a quick test you can run `caffeinate -s` in a terminal, but that
+  only lasts until you close the terminal — it's not a permanent solution.
+- Verify with `pmset -g` (look at `sleep` — it should be `0`). To force it:
+  `sudo pmset -a sleep 0 disksleep 0` (display sleep is fine to leave on).
+
+**Keep a Linux machine awake**
+- Servers/Pis are normally always-on already. To be sure nothing suspends it:
+  `sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target`
+- On a laptop, stop it suspending when the lid closes — set
+  `HandleLidSwitch=ignore` in `/etc/systemd/logind.conf`, then
+  `sudo systemctl restart systemd-logind`.
+
+**Either way:** pair this with the `@reboot` crontab line above so the server
+also comes back after a power blip or reboot.
 
 ---
 
-## Access & security (Configure tab)
+## Windows (untested)
 
-By default the server binds to **localhost** — reachable only from the Mac it
-runs on, no password. The **Configure** tab lets you change that:
+> **This has never been run or tested on Windows.** It's built and used on
+> macOS, and should work on Linux. The notes below are a best-effort starting
+> point, not a supported path — expect to do some debugging.
+
+**Native Windows won't work as-is.** Two things depend on a Unix environment:
+- Scheduling shells out to `cron`, which Windows doesn't have — so saving a
+  schedule would fail and nothing would run automatically. (A Windows port
+  would use Task Scheduler / `schtasks` instead.)
+- The server's self-restart and `scripts/restart.sh` assume `/bin/sh` and bash.
+
+**Recommended path: WSL2** (Windows Subsystem for Linux). Inside a WSL2 Linux
+distro the app runs like it does on Linux — Node, cron, and bash all work:
+
+1. Install WSL2 and a distro: `wsl --install` (PowerShell, as admin), reboot.
+2. In the WSL shell, install Node 20+, clone the repo, and follow the macOS/Linux
+   setup above.
+3. Start cron (it isn't on by default in WSL): `sudo service cron start`. To make
+   it survive reboots you'll need systemd enabled in WSL, or a Windows Task
+   Scheduler entry that launches the distro at logon.
+4. Keep Windows awake (see the always-on section) — WSL2 only runs while Windows
+   is up and the distro is running.
+5. For LAN/remote access, `localhost` works inside Windows, but reaching the app
+   from *other* devices requires a Windows-side port proxy
+   (`netsh interface portproxy add v4tov4 listenport=8787 connectaddress=<wsl-ip> connectport=8787`),
+   because WSL2 sits behind a virtual NAT.
+
+If someone wants a clean native-Windows version (a `schtasks` scheduler backend
+plus a non-bash start script), the Tesla/report/UI code is already platform-
+neutral — only the scheduling and restart glue would need a Windows variant.
+PRs welcome.
+
+---
+
+## Network access (Configure tab)
+
+By default the server binds to **localhost** — reachable only from the machine
+it runs on, no password. The **Configure** tab lets you change that:
 
 | Mode | Binds to | Reachable by | Password |
 |---|---|---|---|
@@ -236,7 +339,7 @@ runs on, no password. The **Configure** tab lets you change that:
 - **"Public" only changes the bind** — it does not open your router. You must
   put the app behind an HTTPS tunnel or reverse proxy. **Never port‑forward
   plain HTTP**; the Basic Auth password would travel unencrypted.
-- Changing access mode / port restarts the server (the LaunchAgent respawns it).
+- Changing access mode / port restarts the server (it respawns itself).
 
 ### Recommended: remote access with Tailscale
 
@@ -296,6 +399,66 @@ All gitignored (never committed):
 
 Templates `config/default-schedule.json` and `.env.example` are committed; real
 values are created locally on first run.
+
+---
+
+## Security
+
+This is a personal, self-hosted tool. It runs entirely on your own machine and
+talks to exactly one external service — **Tesla's Fleet API**. There is no cloud
+backend, no telemetry, and no analytics: nothing about your home, energy usage,
+or credentials is sent anywhere except Tesla.
+
+**Your secrets stay local.**
+- Tesla OAuth tokens (`config/tokens.json`), your API client ID/secret (`.env`,
+  `config/local-settings.json`), and your signing key (`private-key.pem`) exist
+  only on disk on your machine. All are gitignored (see *Configuration files*)
+  and never committed or sent to any third party.
+- Your Tesla **account password is never stored** — auth is OAuth, so the app
+  only ever holds scoped tokens, which you can revoke at any time (below).
+
+**Blast radius — what a compromise could and couldn't do.**
+- The OAuth scopes granted are energy-only (`energy_device_data energy_cmds`).
+  So the worst anyone reaching the app could do is **read your energy data and
+  change your Powerwall settings** (backup reserve, mode, exports, grid
+  charging). They **cannot** touch your vehicles, your Tesla account, your
+  payment methods, or your password.
+- In practice the worst case is someone draining your battery or changing your
+  outage reserve. Bad, but bounded.
+
+**Access control.**
+- The server **binds to localhost by default** — not reachable from any other
+  device. LAN and Public are explicit opt-ins (see *Network access*).
+- When you set a password it protects **every** request (HTTP Basic Auth). It's
+  stored **salted and hashed with scrypt** — never plaintext, never in git — and
+  compared in constant time.
+- **Public mode requires a password**; the server refuses to come up in public
+  mode without one and falls back to localhost.
+
+**Honest limitations — please read.**
+- HTTP Basic Auth sends the password Base64-encoded, which is **not
+  encryption**. Over plain HTTP anyone on the network path can read it. A
+  password is therefore only meaningful on a **trusted LAN** or **behind HTTPS**
+  (a Tailscale / Cloudflare tunnel or reverse proxy). This is exactly why the
+  recommended remote-access path is Tailscale, and why "Public over plain HTTP"
+  is flagged as unsafe.
+- The app is **not hardened for hostile multi-user networks**: no rate limiting,
+  no CSRF protection, no per-user audit. It assumes a single trusted owner on a
+  machine they control. **Treat the machine itself as the security boundary** —
+  anyone with access to it, or to an unprotected open port, can control your
+  Powerwall.
+
+**Revoking access.** You can revoke this app's access anytime from your Tesla
+account's third-party-apps settings; that invalidates the stored tokens
+immediately. Do this if the machine is lost, shared, or decommissioned.
+
+**Your responsibilities.**
+- Keep the host machine secure and patched — it holds long-lived refresh tokens
+  and can command your battery.
+- Use a password for any access mode other than localhost.
+- Before pushing to a public repo, confirm secrets are untracked (they're
+  gitignored, but verify): `git status` should never list `.env`,
+  `config/tokens.json`, `config/local-settings.json`, or `*.pem`.
 
 ---
 

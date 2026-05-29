@@ -29,6 +29,11 @@ actual PG&E bill.
 - **Apply + verify** — when a scheduled time hits, the app POSTs the settings,
   waits for the gateway to settle, reads `site_info` back, and retries the
   fields that didn't apply. No more silent "it said 200 but nothing changed."
+- **Insights** report — rules-based analyzers run over the last 14 days of
+  your data and surface specific, dollar-quantified opportunities (e.g.
+  *"Morning load is pulling from the grid at $0.32/kWh; a Self‑Powered step
+  at 7 AM saves ~$13/month"*). Includes a ready‑to‑paste prompt for ChatGPT /
+  Claude / Gemini if you want a second opinion — no API key required.
 - **Net Billing** report — grid import/export/net kWh by day and time window.
 - **TOU Cost** report — your grid usage priced against your time‑of‑use rate
   plan, with a peak‑window audit (did the battery carry the 4–9 PM peak?).
@@ -61,6 +66,23 @@ actual PG&E bill.
   Pages, Netlify, or an S3 bucket behind CloudFront works; it just needs HTTPS.)
 
 This is a personal, single‑household tool. It is not a hosted service.
+
+---
+
+## Get the code
+
+Clone the repo from GitHub:
+
+```bash
+git clone https://github.com/ToddHoff/Tesla-Powerwall-Scheduler.git
+cd Tesla-Powerwall-Scheduler
+```
+
+You'll run every command in the rest of the setup from this directory.
+
+(If you don't have `git`: on macOS install via Xcode Command Line Tools —
+`xcode-select --install` — or download a ZIP from the GitHub page and unzip
+it.)
 
 ---
 
@@ -202,8 +224,12 @@ at** for the current mode — easiest place to copy it from.
 
 - **Schedules** — view / edit / save the schedule that fires automatically.
   Click **Save** to install (or update) the scheduled jobs at the OS level.
-- **Net Billing / TOU Cost / Solar Savings** — energy + dollar reports against
-  your TOU rates.
+- **Reports** — a parent tab with four sub-tabs:
+  - **Insights** — rules-based recommendations with dollar estimates and a
+    copy-paste prompt for an external AI.
+  - **Net Billing** — kWh in / out / net by day and time bucket.
+  - **TOU Cost** — grid usage priced at your TOU rates.
+  - **Solar Savings** — no-solar hypothetical bill vs. your actual PG&E bill.
 - **Settings** — what the Powerwall is doing right now, the rate plan in
   effect, and the **Scheduled jobs** panel that shows exactly which jobs the
   OS scheduler has installed (verify Save worked).
@@ -281,6 +307,38 @@ Each job writes to its own log: `logs/run-<HHMM>.log`. The **Activity** tab
 merges these with server events and lets you filter by source.
 
 ### Reports
+
+The Reports tab has four sub-tabs:
+
+- **Insights** — runs a fixed set of rules-based analyzers against the last
+  14 days of your data and surfaces specific, dollar-quantified
+  recommendations as cards. Each card has a title, an estimated `$X/month`
+  saving, a one-line summary, a concrete recommendation, and an expandable
+  `▶ details` block with the raw numbers. Current analyzers:
+  - `peak-grid-imports` — flags $ spent on grid during the 4–9 PM peak.
+  - `partial-peak-imports` — flags $ spent during the 3–4 PM and 9 PM–midnight
+    partial-peak windows.
+  - `mode-mismatch-mornings` — flags morning load (6 AM–noon) pulling from the
+    grid when Self-Powered would have used the battery.
+  - `reserve-floor-breach` — flags days the battery hit its reserve floor
+    before 9 PM, costing peak imports.
+  - `unproductive-grid-charging` — flags overnight grid-charging on days when
+    solar later exported more than was bought, suggesting the grid charge was
+    unnecessary.
+
+  Below the cards is a **"Prompt for an external AI"** textarea — a complete,
+  ready-to-paste prompt containing your rate plan, active schedule, current
+  Powerwall settings, 14-day usage aggregates, hourly load profile, and the
+  rules-based findings. A **Copy** button puts it on the clipboard so you can
+  paste into ChatGPT / Claude / Gemini for additional analysis without writing
+  a single line of context. The app itself makes no outbound LLM calls — your
+  data stays local unless you choose to paste it.
+
+  > **Why 14 days, not 30?** The Insights endpoint calls Tesla's
+  > `calendar_history` once per day in the window. Tesla rate-limits these
+  > calls; 30 sequential requests trip the limit. 14 is enough signal for
+  > the analyzers and stays comfortably under the budget. If you want a
+  > longer window, server-side caching (1-hour TTL) is a natural follow-up.
 
 - **Net Billing** — kWh in/out/net by day and time bucket.
 - **TOU Cost** — grid usage priced at your TOU rates; flags any day with

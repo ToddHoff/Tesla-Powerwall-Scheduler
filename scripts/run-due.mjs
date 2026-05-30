@@ -106,11 +106,13 @@ async function runStep(stepId, { dryRun }) {
   const verification = await verifyWithRetry(step, config);
 
   if (verification.ok) {
-    await logEvent('info', 'step_verified', {
+    const eventName = verification.unverifiable?.length ? 'step_verified_partial' : 'step_verified';
+    await logEvent(verification.unverifiable?.length ? 'warn' : 'info', eventName, {
       id: step.id,
       time: step.time,
       attempts: verification.attempts,
-      observed: verification.observed
+      observed: verification.observed,
+      unverifiable: verification.unverifiable || []
     });
   } else {
     await logEvent('error', 'verify_failed', {
@@ -118,6 +120,7 @@ async function runStep(stepId, { dryRun }) {
       time: step.time,
       attempts: verification.attempts,
       mismatched: verification.mismatched,
+      unverifiable: verification.unverifiable || [],
       observed: verification.observed
     });
   }
@@ -181,13 +184,29 @@ async function verifyWithRetry(step, config) {
     disallow_charge_from_grid_with_solar_installed: !step.gridCharging
   };
 
+  let lastObserved = null;
+  let lastUnverifiable = [];
+
   for (let attempt = 1; attempt <= VERIFY_MAX_ATTEMPTS; attempt += 1) {
     await sleep(attempt === 1 ? VERIFY_SETTLE_MS : VERIFY_RETRY_MS);
     const observed = await readSiteInfo(config);
-    const mismatched = diffFields(desired, observed);
+    lastObserved = observed;
+    const { mismatched, unverifiable } = diffFields(desired, observed);
+    lastUnverifiable = unverifiable;
+
+    // Tesla sometimes omits fields from site_info entirely. Don't fail or retry
+    // on missing fields — only on values that came back wrong.
+    if (unverifiable.length) {
+      await logEvent('warn', 'verify_unavailable', {
+        id: step.id,
+        attempt,
+        unverifiable,
+        observed
+      });
+    }
 
     if (mismatched.length === 0) {
-      return { ok: true, attempts: attempt, observed };
+      return { ok: true, attempts: attempt, observed, unverifiable };
     }
 
     await logEvent('warn', 'verify_mismatch', {
@@ -198,10 +217,12 @@ async function verifyWithRetry(step, config) {
     });
 
     if (attempt === VERIFY_MAX_ATTEMPTS) {
-      return { ok: false, attempts: attempt, observed, mismatched };
+      return { ok: false, attempts: attempt, observed, mismatched, unverifiable };
     }
 
-    // Re-POST only the mismatched fields. Path-per-field so we don't redo settled work.
+    // Re-POST only the mismatched fields. Path-per-field so we don't redo
+    // settled work. Missing fields are NOT re-POSTed — we have no evidence
+    // they need to be, and re-posting could undo a good state.
     const energySiteId = config.tesla.energySiteId;
     const retryRequests = buildRequests(step, energySiteId).filter(request => {
       if (request.name === 'backup') return mismatched.some(m => m.field === 'backup_reserve_percent');
@@ -217,7 +238,7 @@ async function verifyWithRetry(step, config) {
     await postRequests(retryRequests);
   }
 
-  return { ok: false, attempts: VERIFY_MAX_ATTEMPTS, observed: null, mismatched: [] };
+  return { ok: false, attempts: VERIFY_MAX_ATTEMPTS, observed: lastObserved, mismatched: [], unverifiable: lastUnverifiable };
 }
 
 async function readSiteInfo(config) {
@@ -233,14 +254,22 @@ async function readSiteInfo(config) {
   };
 }
 
+// Returns { mismatched, unverifiable }:
+//   - mismatched: observed value exists and differs from desired (real failure)
+//   - unverifiable: Tesla's site_info response omitted the field entirely
+//     (no way to confirm; not necessarily a failure)
 function diffFields(desired, observed) {
-  const out = [];
+  const mismatched = [];
+  const unverifiable = [];
   for (const field of Object.keys(desired)) {
-    if (desired[field] !== observed?.[field]) {
-      out.push({ field, desired: desired[field], observed: observed?.[field] });
+    const obs = observed?.[field];
+    if (obs === undefined) {
+      unverifiable.push({ field, desired: desired[field] });
+    } else if (desired[field] !== obs) {
+      mismatched.push({ field, desired: desired[field], observed: obs });
     }
   }
-  return out;
+  return { mismatched, unverifiable };
 }
 
 function sleep(ms) {

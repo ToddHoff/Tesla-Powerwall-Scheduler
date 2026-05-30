@@ -362,9 +362,17 @@ Each scheduled job runs `scripts/run-due.mjs --step <id>`, which:
 1. POSTs the row's backup / operation / grid‑import‑export settings.
 2. Waits ~45 s for the gateway to settle.
 3. Reads `site_info` back and compares all four fields.
-4. Re‑POSTs only the fields that didn't match, waits, re‑checks — up to 3 tries.
-5. Logs `step_verified` on success or `verify_failed` (with the mismatched
-   fields) on exhaustion.
+4. Re‑POSTs only the fields that came back *wrong*, waits, re‑checks — up to
+   3 tries. Fields that come back **missing entirely** from Tesla's response
+   are not retried (Tesla sometimes omits fields; we treat that as
+   "unverifiable," not "wrong").
+5. Logs one of:
+   - `step_verified` — every field matched.
+   - `step_verified_partial` (WARN) — every field that came back matched, but
+     one or more were missing from the response. The full raw observed object
+     is captured so you can audit.
+   - `verify_failed` (ERROR) — at least one field came back with a wrong value
+     after all 3 attempts.
 
 Each job writes to its own log: `logs/run-<HHMM>.log`. The **Activity** tab
 merges these with server events and lets you filter by source.
